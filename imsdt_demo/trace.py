@@ -87,6 +87,16 @@ def _trace_from_result(result: DemoResult) -> dict[str, Any]:
         "nodes": nodes,
         "links": _links(result),
         "steps": _steps(result, selected_node, vehicles),
+        "taskQueue": _task_queue(result),
+        "batchDecisions": _batch_decisions(result),
+        "batchSummary": {
+            "taskCount": len(result.batch_schedule.queue),
+            "averageLatencyMs": round(result.batch_schedule.average_latency_ms, 3),
+            "totalEnergyJ": round(result.batch_schedule.total_energy_j, 3),
+            "averageSatisfaction": round(result.batch_schedule.average_satisfaction, 5),
+            "slaViolationRate": round(result.batch_schedule.sla_violation_rate, 5),
+            "targetCounts": result.batch_schedule.target_counts,
+        },
         "evaluations": [_evaluation(item, result.selected) for item in result.evaluations],
         "selected": {
             "target": result.selected.plan.target.value,
@@ -108,10 +118,11 @@ def _trace_from_result(result: DemoResult) -> dict[str, Any]:
             "syncQuality": round(result.sync_state.quality, 5),
             "predictionConfidence": round(result.prediction.confidence, 5),
             "dominantIntent": result.profile.dominant_intent.value,
-            "vehicleCount": len(vehicles),
+            "vehicleCount": len(result.batch_schedule.queue),
             "roadCount": len(roads),
             "rsuCount": 3,
             "edgeCount": 2,
+            "taskCount": len(result.batch_schedule.queue),
         },
     }
 
@@ -138,7 +149,7 @@ def _nodes(result: DemoResult, vehicles: list[dict[str, Any]]) -> list[dict[str,
             "id": "local",
             "type": "compute",
             "label": "本地计算",
-            "subtitle": f"{scene.vehicle.vehicle_id} 车载 ECU",
+            "subtitle": "各车辆车载 ECU",
             "attrs": {
                 "算力": f"{scene.vehicle.local_compute_ghz:.1f} GHz",
                 "传输时延": "0 ms",
@@ -390,6 +401,19 @@ def _steps(
     vehicle_ids = [vehicle["id"] for vehicle in vehicles]
     rsu_ids = ["rsu-primary", "rsu-west", "rsu-south"]
     edge_ids = ["edge-primary", "edge-west"]
+    batch_nodes = sorted(
+        {
+            _node_for_target(item.selected.plan.target)
+            for item in result.batch_schedule.scheduled
+        }
+    )
+    batch_links = sorted(
+        {
+            link
+            for item in result.batch_schedule.scheduled
+            for link in _path_for_target(item.selected.plan.target)
+        }
+    )
     candidate_text = [
         (
             f"{item.plan.target.value}: 时延 {item.latency_ms:.1f} ms，"
@@ -397,18 +421,27 @@ def _steps(
         )
         for item in sorted(result.evaluations, key=lambda data: data.intent_satisfaction, reverse=True)
     ]
+    batch_text = [
+        (
+            f"{item.order}. {item.queue_item.vehicle.vehicle_id} / {item.queue_item.task.task_type}: "
+            f"{item.selected.plan.target.value}，"
+            f"时延 {item.execution.latency_ms:.1f} ms，"
+            f"满足度 {item.execution.intent_satisfaction:.3f}"
+        )
+        for item in result.batch_schedule.scheduled
+    ]
     return [
         {
             "id": "state",
             "title": "场景状态",
-            "summary": f"示范区内 {len(vehicles)} 辆车运行，{scene.vehicle.vehicle_id} 产生 {scene.task.task_type} 任务。",
+            "summary": f"示范区内 {len(vehicles)} 辆车同时产生 {len(result.batch_schedule.queue)} 个计算任务。",
             "activeNodes": vehicle_ids + rsu_ids + edge_ids,
             "activeLinks": [],
             "details": [
-                f"任务大小 {scene.task.size_mb:.2f} MB，计算量 {scene.task.cpu_cycles_g:.2f} G cycles。",
-                f"截止时间 {scene.task.deadline_ms:.1f} ms，优先级 {scene.task.priority}。",
+                f"焦点任务 {scene.task.task_type}，截止时间 {scene.task.deadline_ms:.1f} ms，优先级 {scene.task.priority}。",
                 f"道路 {len(_roads(result))} 条，RSU {len(rsu_ids)} 个，边缘节点 {len(edge_ids)} 个。",
                 f"主 RSU 利用率 {scene.edge.rsu_utilization:.2f}，主边缘云利用率 {scene.edge.edge_utilization:.2f}。",
+                "任务队列按优先级、截止时间和共享资源压力进入批量调度器。",
             ],
             "metrics": {
                 "车辆电量": scene.vehicle.battery_percent,
@@ -484,47 +517,50 @@ def _steps(
         },
         {
             "id": "generate",
-            "title": "候选生成",
-            "summary": "任务卸载、资源分配和约束检查智能体生成候选方案。",
-            "activeNodes": ["vehicle", "local", "rsu-primary", "edge-primary", "twin"],
+            "title": "批量候选生成",
+            "summary": "调度器为任务队列中的每个任务生成本地、RSU 和边缘云候选方案。",
+            "activeNodes": vehicle_ids + ["local", "rsu-primary", "edge-primary", "twin"],
             "activeLinks": [
                 "vehicle-local",
                 "vehicle-rsu",
                 "rsu-primary-edge-primary",
                 "edge-primary-cloud",
             ],
-            "details": candidate_text,
+            "details": candidate_text + ["其余车辆任务复用同一候选生成器并共享资源记账。"],
             "metrics": {
-                "候选数": len(result.evaluations) * 20,
-                "可行候选": sum(not item.sla_violation for item in result.evaluations) * 25,
+                "任务数": len(result.batch_schedule.queue) * 15,
+                "候选数": len(result.batch_schedule.queue) * len(result.evaluations) * 5,
+                "焦点可行候选": sum(not item.sla_violation for item in result.evaluations) * 25,
             },
         },
         {
             "id": "evaluate",
-            "title": "孪生评估",
-            "summary": "数字孪生评估每个候选的时延、能耗、可靠性和意图满足度。",
-            "activeNodes": ["local", "rsu-primary", "edge-primary", "twin"],
+            "title": "批量孪生评估",
+            "summary": "数字孪生按批次评估每个任务，并把已分配任务计入后续资源压力。",
+            "activeNodes": ["local", "rsu-primary", "edge-primary", "twin"] + batch_nodes,
             "activeLinks": [
                 "vehicle-local",
                 "vehicle-rsu",
                 "rsu-primary-edge-primary",
                 "edge-primary-twin",
             ],
-            "details": [item.explanation for item in result.evaluations],
+            "details": batch_text,
             "metrics": {
-                "最高满足度": result.selected.intent_satisfaction * 100,
-                "最低风险": (1.0 - min(item.risk_score for item in result.evaluations)) * 100,
+                "平均满足度": result.batch_schedule.average_satisfaction * 100,
+                "平均时延": min(result.batch_schedule.average_latency_ms / 4.0, 100),
+                "违约率": result.batch_schedule.sla_violation_rate * 100,
             },
         },
         {
             "id": "select",
-            "title": "策略选择",
-            "summary": f"选择 {result.selected.plan.target.value}，来源 {result.selected.plan.source}。",
-            "activeNodes": ["twin", selected_node],
-            "activeLinks": selected_path + ["edge-primary-twin"],
+            "title": "批量策略选择",
+            "summary": f"批量调度完成，焦点车辆选择 {result.selected.plan.target.value}。",
+            "activeNodes": ["twin", selected_node] + batch_nodes,
+            "activeLinks": batch_links + ["edge-primary-twin"],
             "details": [
                 result.selected.explanation,
                 result.selected.plan.explanation,
+                f"批量目标分布: {result.batch_schedule.target_counts}。",
             ],
             "metrics": {
                 "意图满足度": result.selected.intent_satisfaction * 100,
@@ -535,16 +571,18 @@ def _steps(
         {
             "id": "execute",
             "title": "执行下发",
-            "summary": f"策略下发到 {result.selected.plan.target.value} 执行，任务开始流转。",
-            "activeNodes": ["vehicle", selected_node],
-            "activeLinks": selected_path + ["twin-vehicle"],
+            "summary": f"{len(result.batch_schedule.scheduled)} 个任务按批量调度结果并行下发。",
+            "activeNodes": vehicle_ids + batch_nodes,
+            "activeLinks": batch_links + ["twin-vehicle"],
             "details": [
                 f"实际时延 {result.execution.latency_ms:.1f} ms。",
                 f"实际可靠性 {result.execution.reliability:.3f}。",
+                f"批量总能耗 {result.batch_schedule.total_energy_j:.2f} J。",
             ],
             "metrics": {
-                "实际满足度": result.execution.intent_satisfaction * 100,
+                "平均满足度": result.batch_schedule.average_satisfaction * 100,
                 "预测误差": result.execution.prediction_error * 100,
+                "完成任务": len(result.batch_schedule.scheduled) * 15,
             },
         },
         {
@@ -600,23 +638,6 @@ def _path_for_target(target: Target) -> list[str]:
     if target == Target.RSU:
         return ["vehicle-rsu"]
     return ["vehicle-rsu", "rsu-primary-edge-primary"]
-
-
-def _vehicle_path() -> list[dict[str, float]]:
-    """车辆在页面中的演示轨迹，按步骤索引推进。"""
-
-    return [
-        {"x": 8, "y": 73},
-        {"x": 14, "y": 71},
-        {"x": 20, "y": 69},
-        {"x": 27, "y": 67},
-        {"x": 34, "y": 64},
-        {"x": 41, "y": 62},
-        {"x": 48, "y": 60},
-        {"x": 55, "y": 59},
-        {"x": 62, "y": 61},
-        {"x": 69, "y": 64},
-    ]
 
 
 def _roads(result: DemoResult) -> list[dict[str, Any]]:
@@ -680,123 +701,78 @@ def _roads(result: DemoResult) -> list[dict[str, Any]]:
 
 
 def _fleet(result: DemoResult) -> list[dict[str, Any]]:
-    """生成示范区车辆队列，焦点车辆参与真实决策，其他车辆提供环境上下文。"""
+    """从批量任务队列生成前端车辆队列。"""
 
-    scene = result.scene
-    focus_type = "emergency" if scene.name == "emergency" else "focus"
+    decision_by_queue = {
+        item.queue_item.queue_id: item for item in result.batch_schedule.scheduled
+    }
+    vehicles: list[dict[str, Any]] = []
+    for item in result.batch_schedule.queue:
+        decision = decision_by_queue.get(item.queue_id)
+        attrs = {
+            "任务": item.task.task_type,
+            "任务大小": f"{item.task.size_mb:.2f} MB",
+            "截止时间": f"{item.task.deadline_ms:.1f} ms",
+            "优先级": str(item.task.priority),
+            "速度": f"{item.vehicle.speed_mps:.1f} m/s",
+            "电量": f"{item.vehicle.battery_percent:.1f}%",
+        }
+        if decision is not None:
+            attrs.update(
+                {
+                    "调度目标": decision.selected.plan.target.value,
+                    "调度顺序": str(decision.order),
+                    "实际时延": f"{decision.execution.latency_ms:.1f} ms",
+                }
+            )
+        vehicles.append(
+            {
+                "id": "vehicle" if item.role == "focus" else item.vehicle.vehicle_id,
+                "label": item.vehicle.vehicle_id,
+                "subtitle": "焦点任务车辆" if item.role == "focus" else item.task.task_type,
+                "role": item.role,
+                "vehicleType": item.vehicle_type,
+                "path": list(item.path),
+                "attrs": attrs,
+            }
+        )
+    return vehicles
+
+
+def _task_queue(result: DemoResult) -> list[dict[str, Any]]:
+    """转换任务队列为前端列表数据。"""
+
     return [
         {
-            "id": "vehicle",
-            "label": scene.vehicle.vehicle_id,
-            "subtitle": "焦点任务车辆",
-            "role": "focus",
-            "vehicleType": focus_type,
-            "path": _vehicle_path(),
-            "attrs": {
-                "任务": scene.task.task_type,
-                "任务大小": f"{scene.task.size_mb:.2f} MB",
-                "截止时间": f"{scene.task.deadline_ms:.1f} ms",
-                "优先级": str(scene.task.priority),
-                "速度": f"{scene.vehicle.speed_mps:.1f} m/s",
-                "电量": f"{scene.vehicle.battery_percent:.1f}%",
-            },
-        },
-        {
-            "id": "veh-014",
-            "label": "veh-014",
-            "subtitle": "普通感知任务",
-            "role": "background",
-            "vehicleType": "car",
-            "path": _straight_path(14, 76, 78, 64, drift=-2),
-            "attrs": {
-                "任务": "map_update",
-                "任务大小": "0.80 MB",
-                "截止时间": "220.0 ms",
-                "优先级": "3",
-                "速度": "11.8 m/s",
-                "电量": "73.0%",
-            },
-        },
-        {
-            "id": "veh-027",
-            "label": "veh-027",
-            "subtitle": "乘客娱乐任务",
-            "role": "background",
-            "vehicleType": "car",
-            "path": _straight_path(65, 88, 56, 23, drift=1),
-            "attrs": {
-                "任务": "infotainment",
-                "任务大小": "2.40 MB",
-                "截止时间": "450.0 ms",
-                "优先级": "2",
-                "速度": "9.6 m/s",
-                "电量": "64.0%",
-            },
-        },
-        {
-            "id": "veh-033",
-            "label": "veh-033",
-            "subtitle": "协同感知任务",
-            "role": "background",
-            "vehicleType": "truck",
-            "path": _straight_path(9, 33, 70, 24, drift=2),
-            "attrs": {
-                "任务": "cooperative_perception",
-                "任务大小": "1.70 MB",
-                "截止时间": "180.0 ms",
-                "优先级": "6",
-                "速度": "8.4 m/s",
-                "电量": "81.0%",
-            },
-        },
-        {
-            "id": "veh-041",
-            "label": "veh-041",
-            "subtitle": "低电量车辆",
-            "role": "background",
-            "vehicleType": "ev",
-            "path": _straight_path(25, 86, 31, 26, drift=-1),
-            "attrs": {
-                "任务": "diagnostics",
-                "任务大小": "0.60 MB",
-                "截止时间": "260.0 ms",
-                "优先级": "4",
-                "速度": "10.1 m/s",
-                "电量": "19.0%",
-            },
-        },
-        {
-            "id": "veh-052",
-            "label": "veh-052",
-            "subtitle": "边缘缓存请求",
-            "role": "background",
-            "vehicleType": "car",
-            "path": _straight_path(39, 70, 91, 58, drift=-1),
-            "attrs": {
-                "任务": "cache_prefetch",
-                "任务大小": "1.10 MB",
-                "截止时间": "300.0 ms",
-                "优先级": "3",
-                "速度": "13.2 m/s",
-                "电量": "58.0%",
-            },
-        },
+            "queueId": item.queue_id,
+            "vehicleId": item.vehicle.vehicle_id,
+            "taskId": item.task.task_id,
+            "taskType": item.task.task_type,
+            "sizeMb": round(item.task.size_mb, 3),
+            "cpuCyclesG": round(item.task.cpu_cycles_g, 3),
+            "deadlineMs": round(item.task.deadline_ms, 3),
+            "priority": item.task.priority,
+            "role": item.role,
+        }
+        for item in result.batch_schedule.queue
     ]
 
 
-def _straight_path(
-    start_x: float, start_y: float, end_x: float, end_y: float, *, drift: float
-) -> list[dict[str, float]]:
-    """按 10 个播放步骤生成背景车辆移动轨迹。"""
+def _batch_decisions(result: DemoResult) -> list[dict[str, Any]]:
+    """转换批量调度结果为前端表格数据。"""
 
-    points: list[dict[str, float]] = []
-    for index in range(10):
-        ratio = index / 9
-        wave = (index % 3 - 1) * drift * 0.28
-        points.append(
-            {
-                "x": start_x + (end_x - start_x) * ratio,
-                "y": start_y + (end_y - start_y) * ratio + wave,
-            }
-        )
-    return points
+    return [
+        {
+            "order": item.order,
+            "queueId": item.queue_item.queue_id,
+            "vehicleId": item.queue_item.vehicle.vehicle_id,
+            "taskType": item.queue_item.task.task_type,
+            "target": item.selected.plan.target.value,
+            "latencyMs": round(item.execution.latency_ms, 3),
+            "energyJ": round(item.execution.energy_j, 3),
+            "satisfaction": round(item.execution.intent_satisfaction, 5),
+            "slaViolation": item.execution.sla_violation,
+            "selected": item.queue_item.role == "focus",
+        }
+        for item in result.batch_schedule.scheduled
+    ]

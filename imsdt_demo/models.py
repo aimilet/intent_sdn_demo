@@ -193,3 +193,40 @@ class HistoryCase:
         data = asdict(self)
         data["plan"]["target"] = self.plan.target.value
         return data
+
+
+@dataclass(frozen=True)
+class QueuedTask:
+    """多车辆任务队列项：绑定车辆状态、任务负载、移动轨迹和调度角色。"""
+
+    queue_id: str
+    vehicle: VehicleState
+    task: Task
+    role: str
+    vehicle_type: str
+    path: tuple[dict[str, float], ...]
+
+
+@dataclass(frozen=True)
+class ScheduledTask:
+    """批量调度结果项：记录单个任务的候选评估、最终方案和执行反馈。"""
+
+    queue_item: QueuedTask
+    profile: IntentProfile
+    evaluations: tuple[EvaluationResult, ...]
+    selected: EvaluationResult
+    execution: ExecutionResult
+    order: int
+
+
+@dataclass(frozen=True)
+class BatchScheduleResult:
+    """批量调度结果：包含整个任务队列、逐任务决策和聚合指标。"""
+
+    queue: tuple[QueuedTask, ...]
+    scheduled: tuple[ScheduledTask, ...]
+    average_latency_ms: float
+    total_energy_j: float
+    average_satisfaction: float
+    sla_violation_rate: float
+    target_counts: dict[str, int]

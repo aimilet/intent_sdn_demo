@@ -8,6 +8,7 @@ from pathlib import Path
 
 from imsdt_demo import run_demo
 from imsdt_demo.scenario import generate_scene
+from imsdt_demo.task_queue import generate_task_queue
 from imsdt_demo.trace import build_visual_trace
 
 
@@ -18,6 +19,8 @@ class DemoPipelineTest(unittest.TestCase):
         """紧急场景应生成可执行方案，并优先避免硬约束违约。"""
 
         result = run_demo("emergency", history_path=None, save_history=False)
+        self.assertGreaterEqual(len(result.batch_schedule.queue), 6)
+        self.assertEqual(len(result.batch_schedule.queue), len(result.batch_schedule.scheduled))
         self.assertGreaterEqual(len(result.evaluations), 3)
         self.assertFalse(result.selected.sla_violation)
         self.assertGreater(result.selected.intent_satisfaction, 0.5)
@@ -40,12 +43,21 @@ class DemoPipelineTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             generate_scene("unknown")
 
+    def test_task_queue_contains_multiple_vehicle_tasks(self) -> None:
+        """任务生成器应输出多车辆任务队列，而不是单一焦点任务。"""
+
+        queue = generate_task_queue(generate_scene("normal"))
+        self.assertGreaterEqual(len(queue), 6)
+        self.assertEqual(len({item.vehicle.vehicle_id for item in queue}), len(queue))
+        self.assertTrue(any(item.role == "focus" for item in queue))
+
     def test_visual_trace_contains_topology_and_steps(self) -> None:
         """前端轨迹应包含组件、链路、步骤和已选择方案。"""
 
         trace = build_visual_trace("emergency", history_path=None, save_history=False)
         self.assertGreaterEqual(len(trace["vehicles"]), 6)
         self.assertGreaterEqual(len(trace["roads"]), 5)
+        self.assertEqual(len(trace["taskQueue"]), len(trace["batchDecisions"]))
         self.assertGreaterEqual(len(trace["nodes"]), 6)
         self.assertGreaterEqual(len(trace["links"]), 5)
         self.assertEqual(len(trace["steps"]), 10)

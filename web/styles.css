@@ -668,6 +668,10 @@ button {
   font-size: 12px;
 }
 
+.candidate-table.compact-table {
+  min-width: 310px;
+}
+
 .candidate-table th,
 .candidate-table td {
   padding: 9px 7px;

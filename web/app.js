@@ -5,6 +5,8 @@ const scenarioButtons = [...document.querySelectorAll(".scenario-button")];
 const componentList = document.querySelector("#componentList");
 const propertyTable = document.querySelector("#propertyTable");
 const summaryMetrics = document.querySelector("#summaryMetrics");
+const taskRows = document.querySelector("#taskRows");
+const batchRows = document.querySelector("#batchRows");
 const candidateRows = document.querySelector("#candidateRows");
 const executionPanel = document.querySelector("#executionPanel");
 const roadLayer = document.querySelector("#roadLayer");
@@ -96,6 +98,8 @@ function renderAll() {
   renderNodes();
   renderFleet();
   renderStepRail();
+  renderTaskQueue();
+  renderBatchDecisions();
   renderCandidates();
   renderExecution();
   setStep(0);
@@ -266,12 +270,47 @@ function renderCandidates() {
     .join("");
 }
 
+function renderTaskQueue() {
+  taskRows.innerHTML = trace.taskQueue
+    .map(
+      (item) => `
+        <tr class="${item.role === "focus" ? "selected" : ""}">
+          <td>${escapeHtml(item.vehicleId)}</td>
+          <td>${escapeHtml(item.taskType)}</td>
+          <td>${item.priority}</td>
+          <td>${item.deadlineMs.toFixed(0)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+}
+
+function renderBatchDecisions() {
+  batchRows.innerHTML = trace.batchDecisions
+    .slice()
+    .sort((a, b) => a.order - b.order)
+    .map((item) => {
+      const classes = [item.selected ? "selected" : "", item.slaViolation ? "violation" : ""]
+        .filter(Boolean)
+        .join(" ");
+      return `
+        <tr class="${classes}">
+          <td>${escapeHtml(item.vehicleId)}</td>
+          <td>${escapeHtml(item.target)}</td>
+          <td>${item.latencyMs.toFixed(1)}</td>
+          <td>${item.satisfaction.toFixed(3)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
 function renderExecution() {
   const items = [
-    ["实际时延", `${trace.execution.latencyMs.toFixed(1)} ms`],
-    ["实际能耗", `${trace.execution.energyJ.toFixed(2)} J`],
-    ["可靠性", trace.execution.reliability.toFixed(3)],
-    ["预测误差", percent(trace.execution.predictionError)],
+    ["批量任务", String(trace.batchSummary.taskCount)],
+    ["平均时延", `${trace.batchSummary.averageLatencyMs.toFixed(1)} ms`],
+    ["总能耗", `${trace.batchSummary.totalEnergyJ.toFixed(2)} J`],
+    ["违约率", percent(trace.batchSummary.slaViolationRate)],
   ];
   executionPanel.innerHTML = items
     .map(

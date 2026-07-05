@@ -59,6 +59,14 @@ def _json_summary(result: DemoResult) -> dict[str, object]:
         "intent_satisfaction": round(selected.intent_satisfaction, 5),
         "sla_violation": selected.sla_violation,
         "prediction": asdict(result.prediction),
+        "batch": {
+            "task_count": len(result.batch_schedule.queue),
+            "average_latency_ms": round(result.batch_schedule.average_latency_ms, 3),
+            "total_energy_j": round(result.batch_schedule.total_energy_j, 3),
+            "average_satisfaction": round(result.batch_schedule.average_satisfaction, 5),
+            "sla_violation_rate": round(result.batch_schedule.sla_violation_rate, 5),
+            "target_counts": result.batch_schedule.target_counts,
+        },
         "case_count": result.case_count,
     }
 
@@ -77,6 +85,12 @@ def _text_summary(result: DemoResult) -> str:
             f"链路下降 {result.prediction.link_degradation_risk:.3f}"
         ),
         f"历史命中: {result.memory_hits}",
+        (
+            "批量调度: "
+            f"{len(result.batch_schedule.queue)} 个任务, "
+            f"平均时延 {result.batch_schedule.average_latency_ms:.1f} ms, "
+            f"违约率 {result.batch_schedule.sla_violation_rate:.2f}"
+        ),
         "",
         "候选方案:",
         "target   source  latency_ms  energy_j  reliability  satisfaction  risk   violation",

@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from imsdt_demo.agents import CandidateCoordinator
+from imsdt_demo.batch_scheduler import BatchScheduler
 from imsdt_demo.intent import explicit_intents_for_scene, infer_implicit_intents, resolve_intents
 from imsdt_demo.memory import HistoryStore
 from imsdt_demo.models import (
+    BatchScheduleResult,
     EvaluationResult,
     ExecutionResult,
     Intent,
@@ -18,7 +19,8 @@ from imsdt_demo.models import (
     SyncState,
 )
 from imsdt_demo.scenario import generate_scene
-from imsdt_demo.twin import DigitalTwinEvaluator, FuturePredictor, Synchronizer, simulate_execution
+from imsdt_demo.task_queue import generate_task_queue
+from imsdt_demo.twin import FuturePredictor, Synchronizer
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class DemoResult:
     evaluations: tuple[EvaluationResult, ...]
     selected: EvaluationResult
     execution: ExecutionResult
+    batch_schedule: BatchScheduleResult
     memory_hits: int
     case_count: int
 
@@ -53,20 +56,23 @@ def run_demo(
 
     synchronizer = Synchronizer()
     predictor = FuturePredictor()
-    evaluator = DigitalTwinEvaluator()
     sync_state = synchronizer.sync(scene)
     prediction = predictor.predict(scene, window_s=5)
 
     store = HistoryStore(history_path if save_history else None)
     memory_plans = store.reusable_plans(scene, profile, prediction)
-    coordinator = CandidateCoordinator()
-    candidates = coordinator.build_candidates(scene, profile, memory_plans)
-    evaluations = tuple(
-        evaluator.evaluate(candidate, scene, profile, prediction, sync_state)
-        for candidate in candidates
+    task_queue = generate_task_queue(scene)
+    batch_schedule = BatchScheduler().schedule(
+        scene,
+        task_queue,
+        sync_state,
+        prediction,
+        memory_plans={"q-focus": memory_plans},
     )
-    selected = _select_best(evaluations)
-    execution = simulate_execution(selected, scene)
+    focus = _focus_schedule(batch_schedule)
+    evaluations = focus.evaluations
+    selected = focus.selected
+    execution = focus.execution
 
     store.add_case(scene, profile, prediction, selected, execution)
     if save_history:
@@ -81,19 +87,16 @@ def run_demo(
         evaluations=evaluations,
         selected=selected,
         execution=execution,
+        batch_schedule=batch_schedule,
         memory_hits=len(memory_plans),
         case_count=len(store.cases),
     )
 
 
-def _select_best(evaluations: tuple[EvaluationResult, ...]) -> EvaluationResult:
-    """在满足硬约束优先的前提下，选择意图满足度最高且风险较低的方案。"""
+def _focus_schedule(batch_schedule: BatchScheduleResult):
+    """从批量调度结果中取出焦点车辆任务。"""
 
-    if not evaluations:
-        raise ValueError("没有可评估的候选策略。")
-
-    def score(item: EvaluationResult) -> tuple[int, float, float]:
-        feasible = 0 if item.sla_violation else 1
-        return (feasible, item.intent_satisfaction, -item.risk_score)
-
-    return max(evaluations, key=score)
+    for item in batch_schedule.scheduled:
+        if item.queue_item.role == "focus":
+            return item
+    raise ValueError("批量调度结果缺少焦点车辆任务。")
