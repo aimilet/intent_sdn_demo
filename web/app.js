@@ -7,9 +7,10 @@ const propertyTable = document.querySelector("#propertyTable");
 const summaryMetrics = document.querySelector("#summaryMetrics");
 const candidateRows = document.querySelector("#candidateRows");
 const executionPanel = document.querySelector("#executionPanel");
+const roadLayer = document.querySelector("#roadLayer");
 const linkLayer = document.querySelector("#linkLayer");
 const nodeLayer = document.querySelector("#nodeLayer");
-const vehicleMarker = document.querySelector("#vehicleMarker");
+const fleetLayer = document.querySelector("#fleetLayer");
 const stepRail = document.querySelector("#stepRail");
 const stepTitle = document.querySelector("#stepTitle");
 const stepIndex = document.querySelector("#stepIndex");
@@ -90,8 +91,10 @@ function renderAll() {
   selectedTarget.textContent = trace.selected.target;
   renderSummaryMetrics();
   renderComponents();
+  renderRoads();
   renderLinks();
   renderNodes();
+  renderFleet();
   renderStepRail();
   renderCandidates();
   renderExecution();
@@ -106,10 +109,10 @@ function setActiveScenario() {
 
 function renderSummaryMetrics() {
   const metrics = [
+    ["车辆数", String(trace.summary.vehicleCount)],
+    ["道路数", String(trace.summary.roadCount)],
+    ["RSU / 边缘", `${trace.summary.rsuCount} / ${trace.summary.edgeCount}`],
     ["同步质量", percent(trace.summary.syncQuality)],
-    ["预测置信", percent(trace.summary.predictionConfidence)],
-    ["历史命中", String(trace.summary.memoryHits)],
-    ["主导意图", trace.summary.dominantIntent],
   ];
   summaryMetrics.innerHTML = metrics
     .map(
@@ -147,6 +150,22 @@ function renderComponents() {
   });
 }
 
+function renderRoads() {
+  roadLayer.innerHTML = trace.roads
+    .map((road) => {
+      const color = roadColor(road.congestion);
+      return `
+        <g>
+          <line class="road-base" x1="${road.x1}" y1="${road.y1}" x2="${road.x2}" y2="${road.y2}" style="stroke-width:${road.lanes * 2.4};"></line>
+          <line class="road-lane" x1="${road.x1}" y1="${road.y1}" x2="${road.x2}" y2="${road.y2}"></line>
+          <line class="road-load" x1="${road.x1}" y1="${road.y1}" x2="${road.x2}" y2="${road.y2}" style="stroke:${color}; stroke-width:${Math.max(0.8, road.lanes * 0.8)};"></line>
+          <text class="road-label" x="${(road.x1 + road.x2) / 2}" y="${(road.y1 + road.y2) / 2 - 2}">${escapeHtml(road.label)}</text>
+        </g>
+      `;
+    })
+    .join("");
+}
+
 function renderLinks() {
   linkLayer.innerHTML = trace.links
     .map((link) => {
@@ -164,6 +183,7 @@ function renderLinks() {
 
 function renderNodes() {
   nodeLayer.innerHTML = trace.nodes
+    .filter((node) => !node.markerOnly)
     .map(
       (node) => `
         <button class="map-node" data-node="${node.id}" style="left:${node.x}%; top:${node.y}%;">
@@ -182,6 +202,30 @@ function renderNodes() {
   nodeLayer.querySelectorAll(".map-node").forEach((nodeEl) => {
     nodeEl.addEventListener("click", () => {
       selectedNodeId = nodeEl.dataset.node;
+      renderNodeSelection();
+      renderProperties();
+    });
+  });
+}
+
+function renderFleet() {
+  fleetLayer.innerHTML = trace.vehicles
+    .map((vehicle) => {
+      const start = vehicle.path[0];
+      const focusClass = vehicle.role === "focus" ? " focus" : "";
+      return `
+        <button class="fleet-vehicle vehicle-${vehicle.vehicleType}${focusClass}" data-node="${vehicle.id}" style="left:${start.x}%; top:${start.y}%;" title="${escapeHtml(vehicle.label)}">
+          <span class="fleet-body"></span>
+          <span class="fleet-window"></span>
+          <strong>${escapeHtml(vehicle.label.replace("veh-", "v"))}</strong>
+        </button>
+      `;
+    })
+    .join("");
+
+  fleetLayer.querySelectorAll(".fleet-vehicle").forEach((vehicleEl) => {
+    vehicleEl.addEventListener("click", () => {
+      selectedNodeId = vehicleEl.dataset.node;
       renderNodeSelection();
       renderProperties();
     });
@@ -253,7 +297,7 @@ function setStep(index) {
   renderStepDetails(step);
   renderStepMetrics(step);
   renderActiveTopology(step);
-  moveVehicle();
+  moveVehicles();
   stepRail.querySelectorAll(".step-dot").forEach((button) => {
     button.classList.toggle("active", Number(button.dataset.step) === currentStep);
   });
@@ -287,6 +331,10 @@ function renderActiveTopology(step) {
 
   nodeLayer.querySelectorAll(".map-node").forEach((nodeEl) => {
     nodeEl.classList.toggle("active", activeNodes.has(nodeEl.dataset.node));
+  });
+
+  fleetLayer.querySelectorAll(".fleet-vehicle").forEach((vehicleEl) => {
+    vehicleEl.classList.toggle("active", activeNodes.has(vehicleEl.dataset.node));
   });
 
   linkLayer.querySelectorAll(".flow-link").forEach((line) => {
@@ -323,11 +371,17 @@ function renderProperties() {
     .join("");
 }
 
-function moveVehicle() {
-  const pathIndex = Math.min(currentStep, trace.vehiclePath.length - 1);
-  const position = trace.vehiclePath[pathIndex];
-  vehicleMarker.style.left = `${position.x}%`;
-  vehicleMarker.style.top = `${position.y}%`;
+function moveVehicles() {
+  const pathIndex = Math.min(currentStep, trace.steps.length - 1);
+  fleetLayer.querySelectorAll(".fleet-vehicle").forEach((vehicleEl) => {
+    const vehicle = trace.vehicles.find((item) => item.id === vehicleEl.dataset.node);
+    if (!vehicle) {
+      return;
+    }
+    const position = vehicle.path[Math.min(pathIndex, vehicle.path.length - 1)];
+    vehicleEl.style.left = `${position.x}%`;
+    vehicleEl.style.top = `${position.y}%`;
+  });
 }
 
 function startPlayback() {
@@ -354,6 +408,16 @@ function stopPlayback() {
 
 function nodeById(id) {
   return trace.nodes.find((node) => node.id === id);
+}
+
+function roadColor(congestion) {
+  if (congestion >= 0.78) {
+    return "#c24a3d";
+  }
+  if (congestion >= 0.52) {
+    return "#c88719";
+  }
+  return "#168a7a";
 }
 
 function percent(value) {

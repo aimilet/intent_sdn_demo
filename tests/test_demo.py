@@ -44,6 +44,8 @@ class DemoPipelineTest(unittest.TestCase):
         """前端轨迹应包含组件、链路、步骤和已选择方案。"""
 
         trace = build_visual_trace("emergency", history_path=None, save_history=False)
+        self.assertGreaterEqual(len(trace["vehicles"]), 6)
+        self.assertGreaterEqual(len(trace["roads"]), 5)
         self.assertGreaterEqual(len(trace["nodes"]), 6)
         self.assertGreaterEqual(len(trace["links"]), 5)
         self.assertEqual(len(trace["steps"]), 10)

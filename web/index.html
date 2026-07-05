@@ -53,16 +53,10 @@
           <div id="selectedTarget" class="status-pill accent">local</div>
         </div>
         <div id="networkMap" class="network-map">
-          <div class="road">
-            <div class="lane lane-top"></div>
-            <div class="lane lane-bottom"></div>
-          </div>
+          <svg id="roadLayer" class="road-layer" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
           <svg id="linkLayer" class="link-layer" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
           <div id="nodeLayer" class="node-layer"></div>
-          <div id="vehicleMarker" class="vehicle-marker" title="车辆">
-            <span class="vehicle-body"></span>
-            <span class="vehicle-window"></span>
-          </div>
+          <div id="fleetLayer" class="fleet-layer"></div>
         </div>
         <div id="stepRail" class="step-rail"></div>
       </section>
