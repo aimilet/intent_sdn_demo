@@ -8,7 +8,15 @@ from pathlib import Path
 from imsdt_demo.agents import CandidateCoordinator
 from imsdt_demo.intent import explicit_intents_for_scene, infer_implicit_intents, resolve_intents
 from imsdt_demo.memory import HistoryStore
-from imsdt_demo.models import EvaluationResult, ExecutionResult, Intent, PredictionResult, SceneState, SyncState
+from imsdt_demo.models import (
+    EvaluationResult,
+    ExecutionResult,
+    Intent,
+    IntentProfile,
+    PredictionResult,
+    SceneState,
+    SyncState,
+)
 from imsdt_demo.scenario import generate_scene
 from imsdt_demo.twin import DigitalTwinEvaluator, FuturePredictor, Synchronizer, simulate_execution
 
@@ -19,6 +27,7 @@ class DemoResult:
 
     scene: SceneState
     intents: tuple[Intent, ...]
+    profile: IntentProfile
     sync_state: SyncState
     prediction: PredictionResult
     evaluations: tuple[EvaluationResult, ...]
@@ -66,6 +75,7 @@ def run_demo(
     return DemoResult(
         scene=scene,
         intents=tuple(intents),
+        profile=profile,
         sync_state=sync_state,
         prediction=prediction,
         evaluations=evaluations,

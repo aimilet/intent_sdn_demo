@@ -31,3 +31,19 @@ UV_CACHE_DIR=/tmp/uv-cache uv run python -m unittest discover
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run python -m imsdt_demo --scenario emergency --no-save
 ```
+
+## 前端页面
+
+启动本地页面服务：
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m imsdt_demo.web_server --port 8765
+```
+
+浏览器访问：
+
+```text
+http://127.0.0.1:8765
+```
+
+页面会调用后端 `/api/run` 生成实时决策轨迹。多次运行同一场景会写入 `data/web_history_cases.json`，用于展示历史案例命中。

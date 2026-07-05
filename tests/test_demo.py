@@ -8,6 +8,7 @@ from pathlib import Path
 
 from imsdt_demo import run_demo
 from imsdt_demo.scenario import generate_scene
+from imsdt_demo.trace import build_visual_trace
 
 
 class DemoPipelineTest(unittest.TestCase):
@@ -38,6 +39,15 @@ class DemoPipelineTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             generate_scene("unknown")
+
+    def test_visual_trace_contains_topology_and_steps(self) -> None:
+        """前端轨迹应包含组件、链路、步骤和已选择方案。"""
+
+        trace = build_visual_trace("emergency", history_path=None, save_history=False)
+        self.assertGreaterEqual(len(trace["nodes"]), 6)
+        self.assertGreaterEqual(len(trace["links"]), 5)
+        self.assertEqual(len(trace["steps"]), 10)
+        self.assertIn(trace["selected"]["target"], {"local", "rsu", "edge"})
 
 
 if __name__ == "__main__":
