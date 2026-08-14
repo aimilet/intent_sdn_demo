@@ -1,51 +1,11 @@
-# IMSDT-VEC 演示版
+# 车联网通信意图转译与 SDN 策略下发演示
 
-本目录提供一个轻量 Python demo，用于验证 `docs/todo.csv` 中最小可行版本的主链路：
+项目已停止维护旧的任务卸载、数字孪生和历史记忆 Demo，并进入新版工程重构阶段。旧实现已从当前工作树移除，但可通过 Git 历史恢复。
 
-```text
-场景生成 -> 意图解析 -> 冲突消解 -> 多智能体候选方案 -> 数字孪生评估
-       -> 历史案例检索/写回 -> 执行结果模拟 -> 指标输出
-```
-
-## 运行方式
-
-```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python -m imsdt_demo --scenario emergency
-```
-
-可选场景：
-
-- `normal`：普通低时延任务。
-- `low_energy`：车辆低电量，偏向低能耗。
-- `emergency`：紧急安全任务，偏向低时延和高可靠。
-- `high_load`：边缘节点高负载，验证同步预测和历史记忆链路。
-
-运行测试：
-
-```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python -m unittest discover
-```
-
-默认会将历史案例写入 `data/history_cases.json`。如只想观察单次决策，可使用：
-
-```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python -m imsdt_demo --scenario emergency --no-save
-```
-
-## 前端页面
-
-启动本地页面服务：
-
-```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python -m imsdt_demo.web_server --port 8765
-```
-
-浏览器访问：
+新版将聚焦于以下闭环：
 
 ```text
-http://127.0.0.1:8765
+文字 / 语音转写 / JSON → Intent IR → 规则仲裁 → SDN 策略 → Mininet 验证
 ```
 
-页面会调用后端 `/api/run` 生成实时决策轨迹。多次运行同一场景会写入 `data/web_history_cases.json`，用于展示历史案例命中。
-
-当前前端页面使用多车辆、多道路、多 RSU 和多边缘节点的示范区视图：任务生成器会为多辆车生成任务队列，批量调度器一次性处理整队任务，并在同一批次内累计 RSU/边缘资源占用。页面可直观看到任务队列、批量调度结果、状态同步、预测、候选生成、策略选择、执行下发和反馈更新。
+详细设计见 [项目方案](docs/plan.md)，实施顺序见 [任务表](docs/todo.csv)。新版代码、运行方式和测试命令将在工程骨架完成后补充。
