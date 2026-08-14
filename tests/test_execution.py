@@ -8,6 +8,7 @@ from unittest.mock import patch
 from intent_sdn_demo.errors import IntentError
 from intent_sdn_demo.execution import (
     MininetExecutor,
+    _HOST_NAMES,
     _SWITCH_DPIDS,
     _parse_loss,
     _parse_throughput,
@@ -66,6 +67,16 @@ class ExecutionHelperTest(unittest.TestCase):
         )
         self.assertEqual(len(set(_SWITCH_DPIDS.values())), 4)
 
+    def test_topology_uses_short_internal_host_names_for_veth_interfaces(self) -> None:
+        """Mininet 默认以节点名生成 veth 名称，内部车辆节点必须给接口名留下足够空间。"""
+
+        network = RecordingNetwork()
+
+        MininetExecutor()._build_topology(network)
+
+        self.assertEqual(network.hosts, list(_HOST_NAMES.values()))
+        self.assertTrue(all(len(f"{name}-eth0") <= 15 for name in network.hosts))
+
 
 class FakeHost:
     """只模拟静态 ARP 配置需要的 Mininet Host 接口。"""
@@ -100,10 +111,12 @@ class RecordingNetwork:
         """初始化受控节点和交换机参数记录。"""
 
         self.switches: dict[str, dict[str, object]] = {}
+        self.hosts: list[str] = []
 
     def addHost(self, name: str, **_parameters):  # noqa: N802
         """返回可被 addLink 引用的轻量主机占位对象。"""
 
+        self.hosts.append(name)
         return name
 
     def addSwitch(self, name: str, **parameters):  # noqa: N802

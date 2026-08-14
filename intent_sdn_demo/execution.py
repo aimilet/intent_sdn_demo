@@ -24,6 +24,13 @@ _SWITCH_DPIDS = {
     "high": "0000000000000003",
     "edge": "0000000000000004",
 }
+_HOST_NAMES = {
+    "emergency": "ve",
+    "control": "vc",
+    "navigation": "vn",
+    "video": "vv",
+    "edge": "edge",
+}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -133,11 +140,12 @@ class MininetExecutor:
     def _build_topology(self, network):
         """构建四类车辆、RSU、双核心路径和边缘节点的固定验证拓扑。"""
 
-        emergency = network.addHost("vehEmergency", ip="10.0.0.11/24")
-        control = network.addHost("vehControl", ip="10.0.0.12/24")
-        navigation = network.addHost("vehNavigation", ip="10.0.0.13/24")
-        video = network.addHost("vehVideo", ip="10.0.0.14/24")
-        edge = network.addHost("edge", ip="10.0.0.100/24")
+        # Link 默认生成“节点名-ethN”；Linux 接口名最多 15 个可见字符，内部名必须简短。
+        emergency = network.addHost(_HOST_NAMES["emergency"], ip="10.0.0.11/24")
+        control = network.addHost(_HOST_NAMES["control"], ip="10.0.0.12/24")
+        navigation = network.addHost(_HOST_NAMES["navigation"], ip="10.0.0.13/24")
+        video = network.addHost(_HOST_NAMES["video"], ip="10.0.0.14/24")
+        edge = network.addHost(_HOST_NAMES["edge"], ip="10.0.0.100/24")
         # Mininet 只会从 s1 一类规范名称推导 DPID；展示名称需显式给出稳定十六进制 DPID。
         rsu = network.addSwitch(
             "rsu",
