@@ -161,7 +161,7 @@ flowchart LR
 |---|---|
 | `baseline` | 不改变当前流表与 QoS |
 | `critical_priority` | 紧急业务走低时延路径并绑定高优先级队列 |
-| `congestion_relief` | 背景视频走高容量路径并进行出口限速 |
+| `congestion_relief` | 背景视频走高容量路径，以出口队列和 OpenFlow 计量器固定限速 |
 | `combined` | 同时实施紧急业务保障和背景流量治理 |
 
 所有端口、队列编号、路径和限速值来自拓扑清单及模板常量；外部输入不允许影响命令形态。
@@ -197,7 +197,7 @@ flowchart LR
 - 车辆业务的外部编号保留在 Intent IR 和页面中；Mininet 内部主机使用短名，因为 Link 会生成 `节点名-ethN` veth 名称，而 Linux 接口名缓冲区仅有 `IFNAMSIZ`（16 字节，含结尾空字符）。[Mininet Link API](https://mininet.org/api/classmininet_1_1link_1_1Link.html)、[Linux netdevice(7)](https://man7.org/linux/man-pages/man7/netdevice.7.html)
 - 基线状态将压力流量置于低时延路径，制造可观察的竞争。
 - `critical_priority` 将紧急流量固定到低时延路径和高优先级队列。
-- `congestion_relief` 将视频流量切到高容量路径并限制为 8 Mbps。
+- `congestion_relief` 将视频流量切到高容量路径；出口队列用于服务等级，OpenFlow 1.3 丢弃型计量器以 8 Mbps 固定上限执行数据面限速。
 - `combined` 同时执行以上两项。
 
 Mininet 使用真实 Linux 网络栈和 OpenFlow 交换机，适合在单机上测试可重复的 SDN 策略行为。[Mininet 官方概览](https://mininet.org/overview/)
@@ -212,7 +212,7 @@ Mininet 使用真实 Linux 网络栈和 OpenFlow 交换机，适合在单机上�
 - 两条核心路径的链路利用率。
 - 策略是否覆盖硬目标及其失败原因。
 
-OVS QoS 实现优先使用出口整形与队列；入口 policing 超额时会直接丢包，不能替代优先级队列。队列配置后必须由 OpenFlow `set_queue` 流表选用；OpenFlow 1.3 调用 `ovs-ofctl` 时也必须显式使用 `-O OpenFlow13`。临时拓扑结束时，除解绑端口 QoS 外，还要销毁本次带所有者标记的 QoS 和 Queue 记录，避免 OVSDB 留下孤立资源。[OVS QoS FAQ](https://docs.openvswitch.org/en/stable/faq/qos/)、[OVS OpenFlow FAQ](https://docs.openvswitch.org/en/stable/faq/openflow/)
+OVS QoS 使用出口整形与队列，队列配置后必须由 OpenFlow `set_queue` 流表选用；OpenFlow 1.3 调用 `ovs-ofctl` 时也必须显式使用 `-O OpenFlow13`。在本 Demo 的 TCLink 拓扑中，背景视频的 8 Mbps 硬上限还由 OpenFlow 1.3 丢弃型计量器执行，避免队列仅被选择却没有实际整形时将未达标策略报告为成功；测量值超过 8.5 Mbps 时本次执行必须失败。临时拓扑结束时，除解绑端口 QoS、销毁带所有者标记的 QoS 和 Queue 记录外，还要删除本次已创建的计量器。[OVS QoS FAQ](https://docs.openvswitch.org/en/stable/faq/qos/)、[OVS 流动作与 `set_queue` 文档](https://docs.openvswitch.org/en/stable/ref/ovs-actions.7/)、[OVS `ovs-ofctl` 计量器命令参考](https://www.openvswitch.org/support/dist-docs/ovs-ofctl.8.html)
 
 ## 8. 对外接口与页面流程
 

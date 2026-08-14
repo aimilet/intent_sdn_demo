@@ -418,6 +418,35 @@ class IntentFlowTest(unittest.TestCase):
         self.assertNotIn("rm -rf", str(actions))
         self.assertEqual(actions[0]["parameters"]["path"], "low-latency-path")
 
+    def test_video_governance_preview_contains_fixed_meter_constraint(self) -> None:
+        """视频治理模板必须将 8 Mbps 的数据面计量器展示在人工确认预览中。"""
+
+        envelope = self.service.parse_request(
+            {
+                "source_channel": "json",
+                "actor_role": "operator",
+                "payload": {
+                    "intents": [
+                        _intent(
+                            traffic_class="video",
+                            objective="limit_background_traffic",
+                            strength="must",
+                        )
+                    ]
+                },
+            }
+        )
+        decision = self.service.compile_request({"envelope": envelope.to_dict()})
+
+        actions = decision.selected_plan.to_dict()["actions"]
+        self.assertTrue(
+            any(
+                action["action_type"] == "meter"
+                and action["parameters"] == {"meter_id": "2", "max_rate_mbps": "8"}
+                for action in actions
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

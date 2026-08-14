@@ -24,6 +24,10 @@ _OVS_UUID_PATTERN = re.compile(
 )
 _OWNER = "intent-sdn-demo"
 _PATH_CAPACITY_MBPS = {"low_latency": 20.0, "high_capacity": 50.0}
+_VIDEO_METER_ID = 2
+_VIDEO_MAX_RATE_MBPS = 8.0
+# iperf 的窗口统计和 OpenFlow token bucket 都会产生极小波动；超过该值视为限速未生效。
+_VIDEO_MAX_RATE_TOLERANCE_MBPS = 0.5
 _SWITCH_DPIDS = {
     "rsu": "0000000000000001",
     "low": "0000000000000002",
@@ -59,6 +63,13 @@ class _Ports:
     edge_switch_to_edge: int
     low_interface: str
     high_interface: str
+
+
+@dataclass
+class _CreatedPolicyResources:
+    """记录本次已成功创建的临时资源，确保异常路径也能准确清理。"""
+
+    video_meter_id: int | None = None
 
 
 class MininetExecutor:
@@ -99,6 +110,7 @@ class MininetExecutor:
         result: MetricSnapshot | None = None
         execution_error: IntentError | None = None
         execution_cause: Exception | None = None
+        created_resources = _CreatedPolicyResources()
         try:
             hosts, switches, links = self._build_topology(network)
             network.build()
@@ -111,8 +123,9 @@ class MininetExecutor:
             if plan.plan_id == "baseline":
                 applied = baseline
             else:
-                self._apply_plan(plan, switches["rsu"], ports)
+                self._apply_plan(plan, switches["rsu"], ports, created_resources)
                 applied = self._measure(hosts, switches["rsu"], ports)
+                self._validate_applied_metrics(plan, applied)
             result = MetricSnapshot(plan_id=plan.plan_id, baseline=baseline, applied=applied)
         except IntentError as exc:
             LOGGER.exception("Mininet 验证被中止：计划=%s", plan.plan_id)
@@ -127,7 +140,11 @@ class MininetExecutor:
             execution_cause = exc
         finally:
             try:
-                self._clear_qos(switches.get("rsu"), ports)
+                self._clear_qos(
+                    switches.get("rsu"),
+                    ports,
+                    video_meter_id=created_resources.video_meter_id,
+                )
             except Exception as cleanup_exc:
                 LOGGER.exception("临时 QoS 清理失败，将继续停止 Mininet 拓扑。")
                 if execution_error is None:
@@ -284,11 +301,24 @@ class MininetExecutor:
             _add_flow(high, f"ip,nw_dst={address}", f"output:{ports.high_to_rsu}")
             _add_flow(edge_switch, f"ip,nw_dst={address}", f"output:{ports.edge_switch_to_low}")
 
-    def _apply_plan(self, plan: CandidatePlan, rsu, ports: _Ports) -> None:
-        """根据预览模板应用受限的流表覆盖和 OVS QoS，绝不读取外部命令。"""
+    def _apply_plan(
+        self,
+        plan: CandidatePlan,
+        rsu,
+        ports: _Ports,
+        created_resources: _CreatedPolicyResources,
+    ) -> None:
+        """根据预览模板下发固定流表、队列和计量器，并记录已创建的资源。"""
 
         if plan.plan_id in {"critical_priority", "combined"}:
-            self._configure_qos(rsu, ports.low_interface, queue_id=1, min_rate=12, max_rate=20)
+            self._configure_qos(
+                rsu,
+                ports.low_interface,
+                queue_id=1,
+                min_rate=12,
+                max_rate=20,
+                root_max_rate=int(_PATH_CAPACITY_MBPS["low_latency"]),
+            )
             _add_flow(
                 rsu,
                 "ip,nw_dst=10.0.0.100,udp,tp_dst=5001",
@@ -296,11 +326,22 @@ class MininetExecutor:
                 priority=200,
             )
         if plan.plan_id in {"congestion_relief", "combined"}:
-            self._configure_qos(rsu, ports.high_interface, queue_id=2, min_rate=1, max_rate=8)
+            self._configure_qos(
+                rsu,
+                ports.high_interface,
+                queue_id=2,
+                min_rate=1,
+                max_rate=int(_VIDEO_MAX_RATE_MBPS),
+                root_max_rate=int(_PATH_CAPACITY_MBPS["high_capacity"]),
+            )
+            # TCLink 已创建的根 qdisc 在部分环境中会令 OVS 队列只完成选队不生效。
+            # OpenFlow meter 是独立的数据面约束，确保模板的 8 Mbps 上限不会被静默突破。
+            _add_meter(rsu, _VIDEO_METER_ID, _VIDEO_MAX_RATE_MBPS)
+            created_resources.video_meter_id = _VIDEO_METER_ID
             _add_flow(
                 rsu,
                 "ip,nw_dst=10.0.0.100,udp,tp_dst=5004",
-                f"set_queue:2,output:{ports.rsu_to_high}",
+                f"meter:{_VIDEO_METER_ID},set_queue:2,output:{ports.rsu_to_high}",
                 priority=200,
             )
 
@@ -312,18 +353,36 @@ class MininetExecutor:
         queue_id: int,
         min_rate: int,
         max_rate: int,
+        root_max_rate: int,
     ) -> None:
-        """以 Linux HTB 创建命名队列；接口名称和费率均来自内部固定模板。"""
+        """以 Linux HTB 创建命名队列，根队列保持对应物理路径的固定容量。"""
 
         command = (
             "ovs-vsctl "
             f"-- --id=@queue create Queue external_ids:owner={_OWNER} "
             f"other-config:min-rate={min_rate * 1_000_000} other-config:max-rate={max_rate * 1_000_000} "
             f"-- --id=@qos create QoS type=linux-htb external_ids:owner={_OWNER} "
-            f"other-config:max-rate={max_rate * 1_000_000} queues:{queue_id}=@queue "
+            f"other-config:max-rate={root_max_rate * 1_000_000} queues:{queue_id}=@queue "
             f"-- set Port {interface} qos=@qos"
         )
         _run_checked(rsu, command)
+
+    def _validate_applied_metrics(self, plan: CandidatePlan, metrics: TrafficMetrics) -> None:
+        """校验具有确定量化承诺的策略结果，禁止将未生效策略报告为成功。"""
+
+        if plan.plan_id not in {"congestion_relief", "combined"}:
+            return
+        video_throughput = metrics.throughput_mbps["video"]
+        allowed_rate = _VIDEO_MAX_RATE_MBPS + _VIDEO_MAX_RATE_TOLERANCE_MBPS
+        if video_throughput > allowed_rate:
+            raise IntentError(
+                "policy_effectiveness_failed",
+                (
+                    "背景视频限速未达到模板承诺："
+                    f"实测 {video_throughput:.2f} Mbps，允许上限 {allowed_rate:.2f} Mbps。"
+                ),
+                503,
+            )
 
     def _start_iperf_servers(self, hosts) -> None:
         """在边缘节点启动固定端口的 UDP 服务端，端口仅来自受控拓扑清单。"""
@@ -378,11 +437,19 @@ class MininetExecutor:
             "high_capacity": _read_port_tx_bytes(rsu, ports.rsu_to_high),
         }
 
-    def _clear_qos(self, rsu, ports: _Ports | None) -> None:
-        """清理本次命名 QoS 与队列记录，避免在 OVSDB 中遗留孤立资源。"""
+    def _clear_qos(
+        self,
+        rsu,
+        ports: _Ports | None,
+        *,
+        video_meter_id: int | None = None,
+    ) -> None:
+        """清理本次命名 QoS、队列和已创建计量器，避免临时状态残留。"""
 
         if rsu is None or ports is None:
             return
+        if video_meter_id is not None:
+            _delete_meter(rsu, video_meter_id)
         for interface in (ports.low_interface, ports.high_interface):
             _run_checked(rsu, f"ovs-vsctl --if-exists clear Port {interface} qos")
         queue_ids = _owned_resource_ids(rsu, "Queue")
@@ -419,6 +486,23 @@ def _add_flow(switch, match: str, actions: str, *, priority: int = 100) -> None:
         f"ovs-ofctl -O OpenFlow13 add-flow {switch.name} "
         f"'priority={priority},{match},actions={actions}'",
     )
+
+
+def _add_meter(switch, meter_id: int, max_rate_mbps: float) -> None:
+    """创建仅供背景视频流使用的固定 OpenFlow 1.3 丢弃型计量器。"""
+
+    rate_kbps = int(max_rate_mbps * 1_000)
+    _run_checked(
+        switch,
+        f"ovs-ofctl -O OpenFlow13 add-meter {switch.name} "
+        f"'meter={meter_id},kbps,band=type=drop,rate={rate_kbps}'",
+    )
+
+
+def _delete_meter(switch, meter_id: int) -> None:
+    """删除本次已成功创建的固定计量器，避免临时桥状态残留。"""
+
+    _run_checked(switch, f"ovs-ofctl -O OpenFlow13 del-meters {switch.name} {meter_id}")
 
 
 def _run_checked(node, command: str, *, background: bool = False) -> str:

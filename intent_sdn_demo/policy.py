@@ -167,7 +167,15 @@ def _templates() -> tuple[CandidatePlan, ...]:
             "flow", "rsu", (("match", "udp,tp_dst=5004"), ("path", "high-capacity-path"))
         ),
         PolicyAction(
-            "qos", "high-capacity-path", (("traffic_class", "video"), ("max_rate_mbps", "8")))
+            "qos",
+            "high-capacity-path",
+            (("traffic_class", "video"), ("max_rate_mbps", "8")),
+        ),
+        PolicyAction(
+            "meter",
+            "rsu",
+            (("meter_id", "2"), ("max_rate_mbps", "8")),
+        ),
     )
     congestion = CandidatePlan(
         plan_id="congestion_relief",

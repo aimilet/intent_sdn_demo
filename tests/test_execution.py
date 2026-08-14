@@ -6,11 +6,14 @@ import unittest
 from unittest.mock import patch
 
 from intent_sdn_demo.errors import IntentError
+from intent_sdn_demo.models import TrafficMetrics
 from intent_sdn_demo.execution import (
     MininetExecutor,
+    _CreatedPolicyResources,
     _Ports,
     _HOST_NAMES,
     _SWITCH_DPIDS,
+    _add_meter,
     _owned_resource_ids,
     _path_utilization_percent,
     _parse_loss,
@@ -136,38 +139,88 @@ class ExecutionHelperTest(unittest.TestCase):
             _owned_resource_ids(invalid, "Queue")
 
     def test_qos_cleanup_removes_only_owned_resources_and_verifies_absence(self) -> None:
-        """清理需解绑两个端口、销毁带 owner 标记的记录，并在结束前再次确认为空。"""
+        """清理需删除计量器、解绑端口、销毁带 owner 标记的记录并确认资源为空。"""
 
         queue_id = "12345678-1234-1234-1234-1234567890ab"
         qos_id = "abcdefab-cdef-cdef-cdef-abcdefabcdef"
         rsu = QoSCleanupNode(queue_id, qos_id)
-        ports = _Ports(
-            rsu_to_low=1,
-            rsu_to_high=2,
-            rsu_to_emergency=3,
-            rsu_to_control=4,
-            rsu_to_navigation=5,
-            rsu_to_video=6,
-            low_to_rsu=1,
-            low_to_edge_switch=2,
-            high_to_rsu=1,
-            high_to_edge_switch=2,
-            edge_switch_to_low=1,
-            edge_switch_to_high=2,
-            edge_switch_to_edge=3,
-            low_interface="rsu-eth1",
-            high_interface="rsu-eth2",
-        )
+        ports = _sample_ports()
 
-        MininetExecutor()._clear_qos(rsu, ports)
+        MininetExecutor()._clear_qos(rsu, ports, video_meter_id=2)
 
         commands = "\n".join(rsu.commands)
+        self.assertIn("del-meters rsu 2", commands)
         self.assertIn("clear Port rsu-eth1 qos", commands)
         self.assertIn("clear Port rsu-eth2 qos", commands)
         self.assertIn(f"destroy QoS {qos_id}", commands)
         self.assertIn(f"destroy Queue {queue_id}", commands)
         self.assertEqual(rsu.queue_queries, 2)
         self.assertEqual(rsu.qos_queries, 2)
+
+    def test_video_meter_uses_fixed_openflow13_drop_rate(self) -> None:
+        """背景视频的硬限速必须通过固定 OpenFlow 计量器执行，不能受外部输入影响。"""
+
+        rsu = NamedCommandNode("rsu", "__intent_sdn_status__0")
+
+        _add_meter(rsu, 2, 8.0)
+
+        self.assertIn("-O OpenFlow13 add-meter rsu", rsu.commands[0])
+        self.assertIn("meter=2,kbps,band=type=drop,rate=8000", rsu.commands[0])
+
+    def test_congestion_metric_validation_rejects_unmet_video_rate(self) -> None:
+        """模板承诺视频不超过 8 Mbps 时，超出容差的实测结果必须明确失败。"""
+
+        metrics = TrafficMetrics(
+            emergency_p95_latency_ms=10.0,
+            throughput_mbps={"video": 18.9},
+            packet_loss_percent={"video": 0.0},
+            link_utilization_percent={"low_latency": 0.0, "high_capacity": 20.0},
+        )
+
+        with self.assertRaisesRegex(IntentError, "背景视频限速未达到"):
+            MininetExecutor()._validate_applied_metrics(
+                type("Plan", (), {"plan_id": "combined"})(), metrics
+            )
+
+    def test_video_meter_is_recorded_before_following_flow_failure(self) -> None:
+        """计量器创建后即使随后流表下发失败，finally 也必须知道需要删除该计量器。"""
+
+        executor = MininetExecutor()
+        ports = _sample_ports()
+        resources = _CreatedPolicyResources()
+        plan = type("Plan", (), {"plan_id": "congestion_relief"})()
+
+        with (
+            patch.object(executor, "_configure_qos"),
+            patch("intent_sdn_demo.execution._add_meter"),
+            patch("intent_sdn_demo.execution._add_flow", side_effect=RuntimeError("流表失败")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "流表失败"):
+                executor._apply_plan(plan, NamedCommandNode("rsu", ""), ports, resources)
+
+        self.assertEqual(resources.video_meter_id, 2)
+
+
+def _sample_ports() -> _Ports:
+    """构造固定端口样本，供不创建真实 Mininet 的策略下发测试复用。"""
+
+    return _Ports(
+        rsu_to_low=1,
+        rsu_to_high=2,
+        rsu_to_emergency=3,
+        rsu_to_control=4,
+        rsu_to_navigation=5,
+        rsu_to_video=6,
+        low_to_rsu=1,
+        low_to_edge_switch=2,
+        high_to_rsu=1,
+        high_to_edge_switch=2,
+        edge_switch_to_low=1,
+        edge_switch_to_high=2,
+        edge_switch_to_edge=3,
+        low_interface="rsu-eth1",
+        high_interface="rsu-eth2",
+    )
 
 
 class FakeHost:
@@ -255,6 +308,7 @@ class QoSCleanupNode:
     def __init__(self, queue_id: str, qos_id: str) -> None:
         """保存首轮发现的资源 UUID 和命令记录。"""
 
+        self.name = "rsu"
         self._queue_id = queue_id
         self._qos_id = qos_id
         self.queue_queries = 0

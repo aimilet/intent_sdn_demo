@@ -61,4 +61,4 @@ python3 -m unittest discover -s tests -v
 node --check intent_sdn_demo/web/app.js
 ```
 
-当前环境已完成单元测试、JavaScript 语法检查和沙箱外的本地 HTTP 回归。`combined` 的首次真实 Mininet 结果记录在 [集成验收记录](docs/acceptance.md)；发布当前版本后仍需在可用 `sudo` 的本机完成一次最终复测，以验证 RSU 端口实测利用率和 QoS 清理状态。
+当前环境已完成单元测试、JavaScript 语法检查和沙箱外的本地 HTTP 回归。两次 `combined` 真实 Mininet 结果及限速缺陷记录在 [集成验收记录](docs/acceptance.md)。当前版本将视频 8 Mbps 上限由 OpenFlow 1.3 计量器强制执行，且在实测超过 8.5 Mbps 时返回失败；仍需在可用 `sudo` 的本机完成一次最终复测后关闭集成验收。
