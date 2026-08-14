@@ -17,7 +17,13 @@ from intent_sdn_demo.models import CandidatePlan, MetricSnapshot, TrafficMetrics
 _PING_TIME_PATTERN = re.compile(r"time[=<]([0-9.]+)\s*ms")
 _IPERF_THROUGHPUT_PATTERN = re.compile(r"([0-9.]+)\s+Mbits/sec")
 _IPERF_LOSS_PATTERN = re.compile(r"\(([0-9.]+)%\)")
+_PORT_TX_BYTES_PATTERN = re.compile(r"tx pkts=\d+, bytes=(\d+)")
+_OVS_UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 _OWNER = "intent-sdn-demo"
+_PATH_CAPACITY_MBPS = {"low_latency": 20.0, "high_capacity": 50.0}
 _SWITCH_DPIDS = {
     "rsu": "0000000000000001",
     "low": "0000000000000002",
@@ -88,6 +94,11 @@ class MininetExecutor:
             build=False,
             autoSetMacs=True,
         )
+        switches: dict[str, object] = {}
+        ports: _Ports | None = None
+        result: MetricSnapshot | None = None
+        execution_error: IntentError | None = None
+        execution_cause: Exception | None = None
         try:
             hosts, switches, links = self._build_topology(network)
             network.build()
@@ -96,29 +107,45 @@ class MininetExecutor:
             ports = self._ports(switches, links)
             self._install_baseline_flows(switches, ports)
             self._start_iperf_servers(hosts)
-            baseline = self._measure(hosts)
+            baseline = self._measure(hosts, switches["rsu"], ports)
             if plan.plan_id == "baseline":
                 applied = baseline
             else:
                 self._apply_plan(plan, switches["rsu"], ports)
-                applied = self._measure(hosts)
-            return MetricSnapshot(plan_id=plan.plan_id, baseline=baseline, applied=applied)
-        except IntentError:
+                applied = self._measure(hosts, switches["rsu"], ports)
+            result = MetricSnapshot(plan_id=plan.plan_id, baseline=baseline, applied=applied)
+        except IntentError as exc:
             LOGGER.exception("Mininet 验证被中止：计划=%s", plan.plan_id)
-            raise
+            execution_error = exc
         except Exception as exc:
             LOGGER.exception("Mininet 验证发生内部异常：计划=%s", plan.plan_id)
-            raise IntentError("mininet_execution_failed", "Mininet 策略验证失败，已停止本次临时拓扑。", 503) from exc
+            execution_error = IntentError(
+                "mininet_execution_failed",
+                "Mininet 策略验证失败，已停止本次临时拓扑。",
+                503,
+            )
+            execution_cause = exc
         finally:
             try:
-                self._clear_qos(
-                    switches.get("rsu") if "switches" in locals() else None,
-                    locals().get("ports"),
-                )
-            except Exception:
+                self._clear_qos(switches.get("rsu"), ports)
+            except Exception as cleanup_exc:
                 LOGGER.exception("临时 QoS 清理失败，将继续停止 Mininet 拓扑。")
+                if execution_error is None:
+                    execution_error = IntentError(
+                        "mininet_cleanup_failed",
+                        "Mininet 策略验证后的 QoS 清理失败，已停止临时拓扑。",
+                        503,
+                    )
+                    execution_cause = cleanup_exc
             finally:
                 network.stop()
+        if execution_error is not None:
+            if execution_cause is not None:
+                raise execution_error from execution_cause
+            raise execution_error
+        if result is None:
+            raise IntentError("mininet_execution_failed", "Mininet 未生成策略验证结果。", 503)
+        return result
 
     def reset(self) -> dict[str, str]:
         """临时拓扑每次执行后均已停止，因此重置只确认不存在持久化策略状态。"""
@@ -309,10 +336,12 @@ class MininetExecutor:
                 background=True,
             )
 
-    def _measure(self, hosts) -> TrafficMetrics:
-        """在背景视频压力下采集紧急业务 P95 时延、各流量吞吐、丢包和路径利用率。"""
+    def _measure(self, hosts, rsu, ports: _Ports) -> TrafficMetrics:
+        """在背景视频压力下读取 RSU 出口计数，并采集各业务端到端实测指标。"""
 
         video = hosts["video"]
+        started_at = time.monotonic()
+        start_bytes = self._path_tx_bytes(rsu, ports)
         video.cmd(
             "iperf -c 10.0.0.100 -u -p 5004 -b 18M -t 7 "
             f"> /tmp/{_OWNER}-video-client.log 2>&1 &"
@@ -326,18 +355,28 @@ class MininetExecutor:
         }
         time.sleep(2)
         outputs["video"] = video.cmd(f"cat /tmp/{_OWNER}-video-client.log")
+        elapsed_seconds = time.monotonic() - started_at
+        end_bytes = self._path_tx_bytes(rsu, ports)
         throughput = {traffic: _parse_throughput(output) for traffic, output in outputs.items()}
         loss = {traffic: _parse_loss(output) for traffic, output in outputs.items()}
-        low_load = throughput["emergency"] + throughput["control"] + throughput["navigation"]
         return TrafficMetrics(
             emergency_p95_latency_ms=_p95_ping_latency(ping_output),
             throughput_mbps=throughput,
             packet_loss_percent=loss,
-            link_utilization_percent={
-                "low_latency": round(min(100.0, low_load / 20 * 100), 2),
-                "high_capacity": round(min(100.0, throughput["video"] / 50 * 100), 2),
-            },
+            link_utilization_percent=_path_utilization_percent(
+                start_bytes,
+                end_bytes,
+                elapsed_seconds,
+            ),
         )
+
+    def _path_tx_bytes(self, rsu, ports: _Ports) -> dict[str, int]:
+        """读取 RSU 两个核心出口的 OVS TX 字节计数，作为路径利用率唯一数据源。"""
+
+        return {
+            "low_latency": _read_port_tx_bytes(rsu, ports.rsu_to_low),
+            "high_capacity": _read_port_tx_bytes(rsu, ports.rsu_to_high),
+        }
 
     def _clear_qos(self, rsu, ports: _Ports | None) -> None:
         """清理本次命名 QoS 与队列记录，避免在 OVSDB 中遗留孤立资源。"""
@@ -345,19 +384,15 @@ class MininetExecutor:
         if rsu is None or ports is None:
             return
         for interface in (ports.low_interface, ports.high_interface):
-            rsu.cmd(f"ovs-vsctl --if-exists clear Port {interface} qos")
-        queue_ids = rsu.cmd(
-            "ovs-vsctl --data=bare --no-heading --columns=_uuid "
-            f"find Queue external_ids:owner={_OWNER}"
-        ).split()
-        qos_ids = rsu.cmd(
-            "ovs-vsctl --data=bare --no-heading --columns=_uuid "
-            f"find QoS external_ids:owner={_OWNER}"
-        ).split()
+            _run_checked(rsu, f"ovs-vsctl --if-exists clear Port {interface} qos")
+        queue_ids = _owned_resource_ids(rsu, "Queue")
+        qos_ids = _owned_resource_ids(rsu, "QoS")
         if qos_ids:
-            rsu.cmd(f"ovs-vsctl --if-exists destroy QoS {' '.join(qos_ids)}")
+            _run_checked(rsu, f"ovs-vsctl --if-exists destroy QoS {' '.join(qos_ids)}")
         if queue_ids:
-            rsu.cmd(f"ovs-vsctl --if-exists destroy Queue {' '.join(queue_ids)}")
+            _run_checked(rsu, f"ovs-vsctl --if-exists destroy Queue {' '.join(queue_ids)}")
+        if _owned_resource_ids(rsu, "Queue") or _owned_resource_ids(rsu, "QoS"):
+            raise RuntimeError("本次验证创建的 QoS 或 Queue 记录仍存在。")
 
 
 def _interface_for(link, node):
@@ -402,6 +437,55 @@ def _run_checked(node, command: str, *, background: bool = False) -> str:
     if status != "0":
         raise RuntimeError("受控网络命令执行失败。")
     return output[:position]
+
+
+def _owned_resource_ids(rsu, table: str) -> tuple[str, ...]:
+    """读取并校验本次所有者标记的 OVSDB UUID，禁止将未验证输出回拼到命令。"""
+
+    output = _run_checked(
+        rsu,
+        "ovs-vsctl --data=bare --no-heading --columns=_uuid "
+        f"find {table} external_ids:owner={_OWNER}",
+    )
+    identifiers = tuple(item for item in output.split() if item)
+    if any(_OVS_UUID_PATTERN.fullmatch(item) is None for item in identifiers):
+        raise RuntimeError("OVSDB 返回了不合法的资源标识。")
+    return identifiers
+
+
+def _read_port_tx_bytes(switch, port: int) -> int:
+    """读取固定 OpenFlow 端口的 TX 字节数，缺少计数时中止而不伪造路径利用率。"""
+
+    output = _run_checked(
+        switch,
+        f"ovs-ofctl -O OpenFlow13 dump-ports {switch.name} {port}",
+    )
+    match = _PORT_TX_BYTES_PATTERN.search(output)
+    if match is None:
+        raise RuntimeError("OVS 端口统计中缺少 TX 字节计数。")
+    return int(match.group(1))
+
+
+def _path_utilization_percent(
+    start_bytes: dict[str, int],
+    end_bytes: dict[str, int],
+    elapsed_seconds: float,
+) -> dict[str, float]:
+    """将 RSU 出口 TX 字节增量换算为测试窗口内的平均链路利用率。"""
+
+    if elapsed_seconds <= 0:
+        raise RuntimeError("路径统计窗口时长必须大于 0。")
+    utilization: dict[str, float] = {}
+    for path, capacity_mbps in _PATH_CAPACITY_MBPS.items():
+        try:
+            byte_delta = end_bytes[path] - start_bytes[path]
+        except KeyError as exc:
+            raise RuntimeError("路径统计缺少核心出口计数。") from exc
+        if byte_delta < 0:
+            raise RuntimeError("OVS 端口 TX 字节计数发生回退。")
+        usage = byte_delta * 8 / elapsed_seconds / 1_000_000 / capacity_mbps * 100
+        utilization[path] = round(min(100.0, usage), 2)
+    return utilization
 
 
 def _p95_ping_latency(output: str) -> float | None:

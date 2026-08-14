@@ -8,11 +8,15 @@ from unittest.mock import patch
 from intent_sdn_demo.errors import IntentError
 from intent_sdn_demo.execution import (
     MininetExecutor,
+    _Ports,
     _HOST_NAMES,
     _SWITCH_DPIDS,
+    _owned_resource_ids,
+    _path_utilization_percent,
     _parse_loss,
     _parse_throughput,
     _p95_ping_latency,
+    _read_port_tx_bytes,
     _run_checked,
 )
 
@@ -98,6 +102,73 @@ class ExecutionHelperTest(unittest.TestCase):
 
         self.assertIn("iperf -s -u -p 5001 & status=$?;", node.commands[0])
 
+    def test_port_tx_bytes_and_utilization_are_calculated_from_counter_deltas(self) -> None:
+        """路径利用率应取 RSU 出口实际字节增量，不能依据业务类型推断所属路径。"""
+
+        switch = NamedCommandNode(
+            "rsu",
+            "port  5: rx pkts=1, bytes=64, drop=0\n"
+            "         tx pkts=20, bytes=2500000, drop=0\n"
+            "__intent_sdn_status__0",
+        )
+
+        tx_bytes = _read_port_tx_bytes(switch, 5)
+        utilization = _path_utilization_percent(
+            {"low_latency": 0, "high_capacity": 0},
+            {"low_latency": tx_bytes, "high_capacity": 1_250_000},
+            1.0,
+        )
+
+        self.assertEqual(tx_bytes, 2_500_000)
+        self.assertEqual(utilization, {"low_latency": 100.0, "high_capacity": 20.0})
+        self.assertIn("dump-ports rsu 5", switch.commands[0])
+
+    def test_owned_resource_ids_accept_only_ovs_uuids(self) -> None:
+        """清理命令只允许已验证的 OVS UUID，防止数据库输出意外进入命令参数。"""
+
+        valid = "12345678-1234-1234-1234-1234567890ab"
+        node = RecordingCommandNode(f"{valid}\n__intent_sdn_status__0")
+
+        self.assertEqual(_owned_resource_ids(node, "Queue"), (valid,))
+
+        invalid = RecordingCommandNode("not-a-uuid__intent_sdn_status__0")
+        with self.assertRaisesRegex(RuntimeError, "不合法"):
+            _owned_resource_ids(invalid, "Queue")
+
+    def test_qos_cleanup_removes_only_owned_resources_and_verifies_absence(self) -> None:
+        """清理需解绑两个端口、销毁带 owner 标记的记录，并在结束前再次确认为空。"""
+
+        queue_id = "12345678-1234-1234-1234-1234567890ab"
+        qos_id = "abcdefab-cdef-cdef-cdef-abcdefabcdef"
+        rsu = QoSCleanupNode(queue_id, qos_id)
+        ports = _Ports(
+            rsu_to_low=1,
+            rsu_to_high=2,
+            rsu_to_emergency=3,
+            rsu_to_control=4,
+            rsu_to_navigation=5,
+            rsu_to_video=6,
+            low_to_rsu=1,
+            low_to_edge_switch=2,
+            high_to_rsu=1,
+            high_to_edge_switch=2,
+            edge_switch_to_low=1,
+            edge_switch_to_high=2,
+            edge_switch_to_edge=3,
+            low_interface="rsu-eth1",
+            high_interface="rsu-eth2",
+        )
+
+        MininetExecutor()._clear_qos(rsu, ports)
+
+        commands = "\n".join(rsu.commands)
+        self.assertIn("clear Port rsu-eth1 qos", commands)
+        self.assertIn("clear Port rsu-eth2 qos", commands)
+        self.assertIn(f"destroy QoS {qos_id}", commands)
+        self.assertIn(f"destroy Queue {queue_id}", commands)
+        self.assertEqual(rsu.queue_queries, 2)
+        self.assertEqual(rsu.qos_queries, 2)
+
 
 class FakeHost:
     """只模拟静态 ARP 配置需要的 Mininet Host 接口。"""
@@ -166,3 +237,40 @@ class RecordingCommandNode:
 
         self.commands.append(command)
         return self._output
+
+
+class NamedCommandNode(RecordingCommandNode):
+    """为端口统计测试额外提供交换机名称的轻量节点。"""
+
+    def __init__(self, name: str, output: str) -> None:
+        """保存固定节点名并复用命令输出记录功能。"""
+
+        super().__init__(output)
+        self.name = name
+
+
+class QoSCleanupNode:
+    """按清理顺序模拟 OVSDB 查询结果，验证不会留下本次命名的资源。"""
+
+    def __init__(self, queue_id: str, qos_id: str) -> None:
+        """保存首轮发现的资源 UUID 和命令记录。"""
+
+        self._queue_id = queue_id
+        self._qos_id = qos_id
+        self.queue_queries = 0
+        self.qos_queries = 0
+        self.commands: list[str] = []
+
+    def cmd(self, command: str) -> str:
+        """模拟清理前有资源、销毁后为空的 OVS 命令输出。"""
+
+        self.commands.append(command)
+        if "find Queue" in command:
+            self.queue_queries += 1
+            output = self._queue_id if self.queue_queries == 1 else ""
+        elif "find QoS" in command:
+            self.qos_queries += 1
+            output = self._qos_id if self.qos_queries == 1 else ""
+        else:
+            output = ""
+        return f"{output}__intent_sdn_status__0"
