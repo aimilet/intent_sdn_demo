@@ -112,6 +112,51 @@ class IntentFlowTest(unittest.TestCase):
         self.assertIsNotNone(decision.selected_plan)
         self.assertEqual(decision.selected_plan.plan_id, "combined")
 
+    def test_multiple_source_envelopes_compile_to_one_unified_plan(self) -> None:
+        """调度方和运营方分别提交的意图应统一仲裁并只生成一个待确认计划。"""
+
+        dispatcher = self.service.parse_request(
+            {
+                "source_channel": "json",
+                "actor_role": "dispatcher",
+                "payload": {
+                    "intents": [
+                        _intent(
+                            traffic_class="emergency",
+                            vehicle_ids=["veh-emergency-01"],
+                            objective="prioritize_traffic",
+                            strength="must",
+                            priority="critical",
+                        )
+                    ]
+                },
+            }
+        )
+        operator = self.service.parse_request(
+            {
+                "source_channel": "json",
+                "actor_role": "operator",
+                "payload": {
+                    "intents": [
+                        _intent(
+                            traffic_class="video",
+                            objective="limit_background_traffic",
+                            strength="prefer",
+                            priority="high",
+                        )
+                    ]
+                },
+            }
+        )
+
+        decision = self.service.compile_request(
+            {"envelopes": [dispatcher.to_dict(), operator.to_dict()]}
+        )
+
+        self.assertEqual(decision.status, "ready")
+        self.assertEqual(decision.selected_plan.plan_id, "combined")
+        self.assertEqual(len(decision.arbitration.active_intents), 2)
+
     def test_apply_requires_previewed_plan_and_enabled_executor(self) -> None:
         """确认下发必须先预览且服务未开启 Mininet 时不得伪造执行结果。"""
 

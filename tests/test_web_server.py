@@ -38,6 +38,7 @@ class WebServerTest(unittest.TestCase):
         health = self._get_json("/api/health")
         self.assertEqual(health["status"], "ok")
         self.assertIn("车联网通信意图转译工作台", self._get_text("/"))
+        self.assertIn("待汇总来源", self._get_text("/"))
         self.assertEqual(self._get_json("/api/metrics")["status"], "not_available")
 
         envelope = self._post_json(
@@ -67,9 +68,35 @@ class WebServerTest(unittest.TestCase):
 
         self.assertEqual(decision["status"], "ready")
         self.assertEqual(decision["selected_plan"]["plan_id"], "critical_priority")
+
+        operator_envelope = self._post_json(
+            "/api/intents/parse",
+            {
+                "source_channel": "json",
+                "actor_role": "operator",
+                "payload": {
+                    "intents": [
+                        {
+                            "scope": {"vehicle_ids": [], "traffic_class": "video"},
+                            "objective": "limit_background_traffic",
+                            "strength": "prefer",
+                            "priority": "high",
+                            "constraints": [],
+                            "evidence": ["运营测试"],
+                            "ambiguities": [],
+                        }
+                    ]
+                },
+            },
+        )
+        combined_decision = self._post_json(
+            "/api/policies/compile",
+            {"envelopes": [envelope, operator_envelope]},
+        )
+        self.assertEqual(combined_decision["selected_plan"]["plan_id"], "combined")
         error = self._post_error(
             "/api/policies/apply",
-            {"plan_id": decision["selected_plan"]["plan_id"]},
+            {"plan_id": combined_decision["selected_plan"]["plan_id"]},
         )
         self.assertEqual(error["error"]["code"], "mininet_disabled")
         self.assertEqual(self._post_json("/api/policies/reset", {})["status"], "reset")

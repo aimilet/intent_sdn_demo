@@ -22,7 +22,7 @@
         <p class="panel-index">01</p>
         <h2 id="input-title">输入与来源</h2>
       </div>
-      <label for="actor-role">提交角色</label>
+      <label for="actor-role">当前来源角色</label>
       <select id="actor-role">
         <option value="dispatcher">调度方</option>
         <option value="operator">网络运营方</option>
@@ -62,6 +62,17 @@
         <option value="invalid">非法车辆（应拒绝）</option>
       </select>
       <button id="load-scenario" class="secondary full" type="button">载入 JSON 示例</button>
+
+      <div class="batch-box" aria-labelledby="batch-title">
+        <div class="batch-heading">
+          <strong id="batch-title">待汇总来源</strong>
+          <button id="clear-batch" class="secondary compact-button" type="button">清空</button>
+        </div>
+        <ol id="envelope-list" class="envelope-list">
+          <li class="empty-state">尚未加入来源意图。</li>
+        </ol>
+        <p class="hint">每次选择一个提交角色并解析，加入后再切换角色提交下一方；最多汇总 10 份。</p>
+      </div>
     </section>
 
     <section class="panel" aria-labelledby="ir-title">
@@ -93,7 +104,7 @@
   </main>
 
   <footer class="action-bar">
-    <button id="parse-intent" type="button">1. 解析意图</button>
+    <button id="parse-intent" type="button">1. 加入来源意图</button>
     <button id="compile-policy" type="button" class="secondary" disabled>2. 编译策略</button>
     <button id="apply-policy" type="button" class="accent" disabled>3. 确认下发并验证</button>
     <button id="reset-policy" type="button" class="danger">重置</button>

@@ -4,7 +4,7 @@
 
 const state = {
   channel: "json",
-  envelope: null,
+  envelopes: [],
   decision: null,
   topology: null,
 };
@@ -16,6 +16,8 @@ const elements = {
   textPayload: document.querySelector("#text-payload"),
   voicePayload: document.querySelector("#voice-payload"),
   scenario: document.querySelector("#scenario"),
+  envelopeList: document.querySelector("#envelope-list"),
+  clearBatchButton: document.querySelector("#clear-batch"),
   irOutput: document.querySelector("#ir-output"),
   decisionSummary: document.querySelector("#decision-summary"),
   decisionOutput: document.querySelector("#decision-output"),
@@ -23,6 +25,19 @@ const elements = {
   metricsOutput: document.querySelector("#metrics-output"),
   compileButton: document.querySelector("#compile-policy"),
   applyButton: document.querySelector("#apply-policy"),
+};
+
+const roleLabels = {
+  dispatcher: "调度方",
+  operator: "网络运营方",
+  driver: "驾驶员",
+  application: "应用",
+};
+
+const channelLabels = {
+  json: "JSON",
+  text: "文字",
+  voice: "语音转写",
 };
 
 const scenarios = {
@@ -113,39 +128,90 @@ function currentPayload() {
   return value.trim();
 }
 
+function renderEnvelopeBatch() {
+  elements.envelopeList.replaceChildren();
+  if (state.envelopes.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "empty-state";
+    empty.textContent = "尚未加入来源意图。";
+    elements.envelopeList.appendChild(empty);
+    elements.compileButton.disabled = true;
+    elements.irOutput.textContent = "等待解析…";
+    return;
+  }
+  state.envelopes.forEach((envelope, index) => {
+    const item = document.createElement("li");
+    item.className = "envelope-item";
+    const summary = document.createElement("span");
+    summary.textContent = `${roleLabels[envelope.actor_role] || envelope.actor_role} · ${channelLabels[envelope.source_channel] || envelope.source_channel} · ${envelope.intents.length} 条意图`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "envelope-remove";
+    remove.textContent = "移除";
+    remove.addEventListener("click", () => removeEnvelope(index));
+    item.append(summary, remove);
+    elements.envelopeList.appendChild(item);
+  });
+  elements.irOutput.textContent = JSON.stringify(state.envelopes, null, 2);
+  elements.compileButton.disabled = false;
+}
+
+function invalidateDecision() {
+  state.decision = null;
+  elements.decisionOutput.textContent = "尚未编译。";
+  elements.decisionSummary.textContent = state.envelopes.length
+    ? "来源意图已更新，请重新执行规则仲裁。"
+    : "完成解析后可进行规则仲裁与候选择优。";
+  elements.applyButton.disabled = true;
+}
+
+function removeEnvelope(index) {
+  state.envelopes.splice(index, 1);
+  renderEnvelopeBatch();
+  invalidateDecision();
+  setStatus("已移除一个来源意图，请重新编译。", "normal");
+}
+
+function clearEnvelopeBatch() {
+  state.envelopes = [];
+  renderEnvelopeBatch();
+  invalidateDecision();
+  setStatus("已清空待汇总来源。", "normal");
+}
+
 async function parseIntent() {
   try {
+    if (state.envelopes.length >= 10) {
+      throw new Error("单次汇总最多包含 10 份来源意图。");
+    }
     setStatus("正在校验并转译意图…");
     const envelope = await request("/api/intents/parse", "POST", {
       source_channel: state.channel,
       actor_role: elements.actorRole.value,
       payload: currentPayload(),
     });
-    state.envelope = envelope;
-    state.decision = null;
-    elements.irOutput.textContent = JSON.stringify(envelope, null, 2);
-    elements.decisionOutput.textContent = "尚未编译。";
-    elements.decisionSummary.textContent = "Intent IR 已通过校验，可进入规则仲裁。";
-    elements.compileButton.disabled = false;
-    elements.applyButton.disabled = true;
-    setStatus(`解析完成：${envelope.intents.length} 条意图。`, "success");
+    state.envelopes.push(envelope);
+    renderEnvelopeBatch();
+    invalidateDecision();
+    setStatus(
+      `已加入第 ${state.envelopes.length} 个来源：${roleLabels[envelope.actor_role] || envelope.actor_role}，${envelope.intents.length} 条意图。`,
+      "success",
+    );
   } catch (error) {
-    state.envelope = null;
-    state.decision = null;
-    elements.compileButton.disabled = true;
-    elements.applyButton.disabled = true;
-    elements.irOutput.textContent = `解析失败：${error.message}`;
+    elements.irOutput.textContent = state.envelopes.length
+      ? `${JSON.stringify(state.envelopes, null, 2)}\n\n本次加入失败：${error.message}`
+      : `解析失败：${error.message}`;
     setStatus("解析被拒绝，未进入策略阶段。", "error");
   }
 }
 
 async function compilePolicy() {
-  if (!state.envelope) {
+  if (state.envelopes.length === 0) {
     return;
   }
   try {
     setStatus("正在执行规则仲裁与候选择优…");
-    const decision = await request("/api/policies/compile", "POST", { envelope: state.envelope });
+    const decision = await request("/api/policies/compile", "POST", { envelopes: state.envelopes });
     state.decision = decision;
     elements.decisionOutput.textContent = JSON.stringify(decision, null, 2);
     elements.decisionSummary.textContent = decision.selection_reason;
@@ -179,8 +245,7 @@ async function applyPolicy() {
 async function resetPolicy() {
   try {
     const result = await request("/api/policies/reset", "POST", {});
-    state.decision = null;
-    elements.applyButton.disabled = true;
+    clearEnvelopeBatch();
     elements.decisionSummary.textContent = result.message;
     elements.metricsOutput.textContent = "已重置；不存在可展示的策略验证指标。";
     setStatus("已清除策略预览与指标缓存。", "success");
@@ -259,6 +324,7 @@ document.querySelectorAll(".tab").forEach((button) => button.addEventListener("c
 document.querySelector("#load-scenario").addEventListener("click", loadScenario);
 document.querySelector("#start-voice").addEventListener("click", startVoiceRecognition);
 document.querySelector("#parse-intent").addEventListener("click", parseIntent);
+elements.clearBatchButton.addEventListener("click", clearEnvelopeBatch);
 elements.compileButton.addEventListener("click", compilePolicy);
 elements.applyButton.addEventListener("click", applyPolicy);
 document.querySelector("#reset-policy").addEventListener("click", resetPolicy);

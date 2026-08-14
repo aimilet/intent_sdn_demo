@@ -51,7 +51,9 @@ sudo python3 -m intent_sdn_demo --enable-mininet --port 8765
 - `POST /api/policies/apply`
 - `POST /api/policies/reset`
 
-`compile` 支持一个 `envelope` 或多个 `envelopes`。`apply` 只接受当前服务进程中已经预览的 `plan_id`，不接受客户端传入的流表、队列或命令参数。
+`compile` 支持一个 `envelope` 或多个 `envelopes`。工作台可以按“选择提交角色 → 解析并加入来源批次”的方式累计最多 10 份来源意图，再统一仲裁和预览；确认时只对最终选中的一个白名单 `plan_id` 下发一次。`apply` 不接受客户端传入的流表、队列或命令参数。
+
+多方演示时，先选择调度方并加入第一份意图，再切换网络运营方、驾驶员或应用并加入后续意图；批次列表会展示来源和通道，可在编译前移除单份来源。角色选择是 Demo 中的来源标识，不等同于真实身份认证。
 
 ## 验证
 
