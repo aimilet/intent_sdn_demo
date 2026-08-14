@@ -1,0 +1,104 @@
+<!-- 本文件提供本地四栏演示工作台；交互与 API 调用由同目录 app.js 完成。 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>车联网通信意图转译工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">本地演示 · 仅监听 127.0.0.1</p>
+      <h1>车联网通信意图转译工作台</h1>
+    </div>
+    <p id="status" class="status" role="status">正在读取固定拓扑…</p>
+  </header>
+
+  <main class="workspace">
+    <section class="panel input-panel" aria-labelledby="input-title">
+      <div class="panel-heading">
+        <p class="panel-index">01</p>
+        <h2 id="input-title">输入与来源</h2>
+      </div>
+      <label for="actor-role">提交角色</label>
+      <select id="actor-role">
+        <option value="dispatcher">调度方</option>
+        <option value="operator">网络运营方</option>
+        <option value="driver">驾驶员</option>
+        <option value="application">应用</option>
+      </select>
+
+      <div class="channel-tabs" role="tablist" aria-label="输入通道">
+        <button class="tab active" type="button" data-channel="json" role="tab" aria-selected="true">JSON</button>
+        <button class="tab" type="button" data-channel="text" role="tab" aria-selected="false">文字</button>
+        <button class="tab" type="button" data-channel="voice" role="tab" aria-selected="false">语音转写</button>
+      </div>
+
+      <div id="json-input" class="channel-content">
+        <label for="json-payload">结构化意图</label>
+        <textarea id="json-payload" maxlength="12000" spellcheck="false" aria-describedby="json-help"></textarea>
+        <p id="json-help" class="hint">直接粘贴含 <code>intents</code> 的 JSON 对象；不会调用大模型。</p>
+      </div>
+      <div id="text-input" class="channel-content hidden">
+        <label for="text-payload">文字意图</label>
+        <textarea id="text-payload" maxlength="2000" placeholder="例如：救护车消息必须低时延，视频可降级。"></textarea>
+        <p class="hint">文字由已配置的远程模型抽取为 IR；模型不参与策略下发。</p>
+      </div>
+      <div id="voice-input" class="channel-content hidden">
+        <button id="start-voice" class="secondary" type="button">开始语音转写</button>
+        <label for="voice-payload">转写文本</label>
+        <textarea id="voice-payload" maxlength="2000" placeholder="语音识别结果会显示在这里。"></textarea>
+        <p class="hint">使用浏览器语音识别；不支持时会明确提示，可手动编辑转写文本。</p>
+      </div>
+
+      <label for="scenario">示例场景</label>
+      <select id="scenario">
+        <option value="combined">综合保障：紧急优先 + 视频治理</option>
+        <option value="critical">紧急业务优先</option>
+        <option value="congestion">背景视频治理</option>
+        <option value="conflict">同级硬冲突（应阻断）</option>
+        <option value="invalid">非法车辆（应拒绝）</option>
+      </select>
+      <button id="load-scenario" class="secondary full" type="button">载入 JSON 示例</button>
+    </section>
+
+    <section class="panel" aria-labelledby="ir-title">
+      <div class="panel-heading">
+        <p class="panel-index">02</p>
+        <h2 id="ir-title">Intent IR</h2>
+      </div>
+      <p class="hint">校验后的唯一中间表示。原始文本不会参与命令拼接。</p>
+      <pre id="ir-output" class="data-output" aria-live="polite">等待解析…</pre>
+    </section>
+
+    <section class="panel" aria-labelledby="decision-title">
+      <div class="panel-heading">
+        <p class="panel-index">03</p>
+        <h2 id="decision-title">仲裁与策略预览</h2>
+      </div>
+      <div id="decision-summary" class="empty-state">完成解析后可进行规则仲裁与候选择优。</div>
+      <pre id="decision-output" class="data-output compact" aria-live="polite">尚未编译。</pre>
+    </section>
+
+    <section class="panel topology-panel" aria-labelledby="topology-title">
+      <div class="panel-heading">
+        <p class="panel-index">04</p>
+        <h2 id="topology-title">Mininet 拓扑与指标</h2>
+      </div>
+      <div id="topology-output" class="topology-output">加载中…</div>
+      <div id="metrics-output" class="metrics-output">尚无已确认下发的实测指标。</div>
+    </section>
+  </main>
+
+  <footer class="action-bar">
+    <button id="parse-intent" type="button">1. 解析意图</button>
+    <button id="compile-policy" type="button" class="secondary" disabled>2. 编译策略</button>
+    <button id="apply-policy" type="button" class="accent" disabled>3. 确认下发并验证</button>
+    <button id="reset-policy" type="button" class="danger">重置</button>
+  </footer>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

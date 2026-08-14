@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import unittest
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from intent_sdn_demo.web_server import create_server
@@ -32,10 +33,12 @@ class WebServerTest(unittest.TestCase):
         self.thread.join(timeout=2)
 
     def test_health_and_structured_parse_compile(self) -> None:
-        """健康检查应成功，结构化输入可完成解析和策略预览。"""
+        """页面、健康检查和结构化输入应完成预览，未启用执行时必须拒绝确认下发。"""
 
         health = self._get_json("/api/health")
         self.assertEqual(health["status"], "ok")
+        self.assertIn("车联网通信意图转译工作台", self._get_text("/"))
+        self.assertEqual(self._get_json("/api/metrics")["status"], "not_available")
 
         envelope = self._post_json(
             "/api/intents/parse",
@@ -64,12 +67,24 @@ class WebServerTest(unittest.TestCase):
 
         self.assertEqual(decision["status"], "ready")
         self.assertEqual(decision["selected_plan"]["plan_id"], "critical_priority")
+        error = self._post_error(
+            "/api/policies/apply",
+            {"plan_id": decision["selected_plan"]["plan_id"]},
+        )
+        self.assertEqual(error["error"]["code"], "mininet_disabled")
+        self.assertEqual(self._post_json("/api/policies/reset", {})["status"], "reset")
 
     def _get_json(self, path: str) -> dict[str, object]:
         """发送本地 GET 请求并解码 JSON。"""
 
         with urlopen(f"{self.base_url}{path}", timeout=3) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def _get_text(self, path: str) -> str:
+        """读取静态页面资源，验证本地工作台由同一回环服务提供。"""
+
+        with urlopen(f"{self.base_url}{path}", timeout=3) as response:
+            return response.read().decode("utf-8")
 
     def _post_json(self, path: str, payload: object) -> dict[str, object]:
         """发送本地 JSON POST 请求并解码 JSON。"""
@@ -82,6 +97,19 @@ class WebServerTest(unittest.TestCase):
         )
         with urlopen(request, timeout=3) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def _post_error(self, path: str, payload: object) -> dict[str, object]:
+        """发送预期失败的请求并读取受控错误对象。"""
+
+        request = Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as captured:
+            urlopen(request, timeout=3)
+        return json.loads(captured.exception.read().decode("utf-8"))
 
 
 if __name__ == "__main__":

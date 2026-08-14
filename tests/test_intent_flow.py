@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from intent_sdn_demo.errors import IntentError
 from intent_sdn_demo.extractor import RemoteIntentExtractor
-from intent_sdn_demo.models import ActorRole
+from intent_sdn_demo.models import ActorRole, MetricSnapshot, TrafficMetrics
 from intent_sdn_demo.service import IntentSdnService
 
 
@@ -50,6 +50,30 @@ class FakeExtractor:
         return self.response
 
 
+class FakeExecutor:
+    """记录策略执行调用并返回固定实测结构，避免单元测试创建网络命名空间。"""
+
+    def __init__(self) -> None:
+        """初始化调用记录，供确认下发边界断言使用。"""
+
+        self.executed_plan_ids: list[str] = []
+        self.reset_calls = 0
+
+    def execute(self, plan) -> MetricSnapshot:
+        """仅接受服务层已缓存的计划，并构造基线与策略后指标。"""
+
+        self.executed_plan_ids.append(plan.plan_id)
+        baseline = TrafficMetrics(12.0, {"emergency": 3.0}, {"emergency": 0.0}, {"low_latency": 90.0})
+        applied = TrafficMetrics(6.0, {"emergency": 5.0}, {"emergency": 0.0}, {"low_latency": 50.0})
+        return MetricSnapshot(plan.plan_id, baseline, applied)
+
+    def reset(self) -> dict[str, str]:
+        """模拟执行器完成重置，避免触及真实 OVS 状态。"""
+
+        self.reset_calls += 1
+        return {"status": "reset", "message": "测试执行器已重置。"}
+
+
 class IntentFlowTest(unittest.TestCase):
     """覆盖新版 Demo 不能回归的关键输入、仲裁和选择路径。"""
 
@@ -87,6 +111,106 @@ class IntentFlowTest(unittest.TestCase):
         self.assertEqual(decision.status, "ready")
         self.assertIsNotNone(decision.selected_plan)
         self.assertEqual(decision.selected_plan.plan_id, "combined")
+
+    def test_apply_requires_previewed_plan_and_enabled_executor(self) -> None:
+        """确认下发必须先预览且服务未开启 Mininet 时不得伪造执行结果。"""
+
+        with self.assertRaisesRegex(IntentError, "已预览"):
+            self.service.apply_request({"plan_id": "combined"})
+
+        envelope = self.service.parse_request(
+            {
+                "source_channel": "json",
+                "actor_role": "dispatcher",
+                "payload": {
+                    "intents": [
+                        _intent(
+                            traffic_class="emergency",
+                            vehicle_ids=["veh-emergency-01"],
+                            objective="prioritize_traffic",
+                            strength="must",
+                            priority="critical",
+                        )
+                    ]
+                },
+            }
+        )
+        decision = self.service.compile_request({"envelope": envelope.to_dict()})
+        with self.assertRaisesRegex(IntentError, "未启用 Mininet"):
+            self.service.apply_request({"plan_id": decision.selected_plan.plan_id})
+
+    def test_apply_executes_only_cached_plan_and_returns_paired_metrics(self) -> None:
+        """执行器只能收到已编译模板，页面获得的指标必须同时包含基线与策略后。"""
+
+        executor = FakeExecutor()
+        service = IntentSdnService(executor=executor)
+        envelope = service.parse_request(
+            {
+                "source_channel": "json",
+                "actor_role": "dispatcher",
+                "payload": {
+                    "intents": [
+                        _intent(
+                            traffic_class="emergency",
+                            vehicle_ids=["veh-emergency-01"],
+                            objective="prioritize_traffic",
+                            strength="must",
+                            priority="critical",
+                        )
+                    ]
+                },
+            }
+        )
+        decision = service.compile_request({"envelope": envelope.to_dict()})
+        result = service.apply_request({"plan_id": decision.selected_plan.plan_id})
+
+        self.assertEqual(executor.executed_plan_ids, ["critical_priority"])
+        self.assertEqual(result["metrics"]["baseline"]["emergency_p95_latency_ms"], 12.0)
+        self.assertEqual(result["metrics"]["applied"]["emergency_p95_latency_ms"], 6.0)
+        self.assertEqual(service.reset_request()["status"], "reset")
+        self.assertEqual(executor.reset_calls, 1)
+
+    def test_new_preview_invalidates_previous_confirmation_token(self) -> None:
+        """新的编译结果必须覆盖旧预览，避免用户确认一个已不再展示的历史策略。"""
+
+        first = self.service.parse_request(
+            {
+                "source_channel": "json",
+                "actor_role": "dispatcher",
+                "payload": {
+                    "intents": [
+                        _intent(
+                            traffic_class="emergency",
+                            vehicle_ids=["veh-emergency-01"],
+                            objective="prioritize_traffic",
+                            strength="must",
+                            priority="critical",
+                        )
+                    ]
+                },
+            }
+        )
+        first_decision = self.service.compile_request({"envelope": first.to_dict()})
+        second = self.service.parse_request(
+            {
+                "source_channel": "json",
+                "actor_role": "operator",
+                "payload": {
+                    "intents": [
+                        _intent(
+                            traffic_class="video",
+                            objective="limit_background_traffic",
+                            strength="must",
+                            priority="high",
+                        )
+                    ]
+                },
+            }
+        )
+        self.service.compile_request({"envelope": second.to_dict()})
+
+        with self.assertRaisesRegex(IntentError, "已预览"):
+            self.service.apply_request({"plan_id": first_decision.selected_plan.plan_id})
 
     def test_unknown_vehicle_is_rejected_before_compilation(self) -> None:
         """未知实体不得作为策略目标流入仲裁或执行层。"""

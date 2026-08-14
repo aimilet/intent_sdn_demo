@@ -298,3 +298,41 @@ class DecisionBundle:
             "selected_plan": self.selected_plan.to_dict() if self.selected_plan else None,
             "selection_reason": self.selection_reason,
         }
+
+
+@dataclass(frozen=True)
+class TrafficMetrics:
+    """一次固定流量场景的实测指标，供基线与策略后结果成对展示。"""
+
+    emergency_p95_latency_ms: float | None
+    throughput_mbps: dict[str, float]
+    packet_loss_percent: dict[str, float]
+    link_utilization_percent: dict[str, float]
+
+    def to_dict(self) -> dict[str, Any]:
+        """转换为 API 和前端可消费的数据。"""
+
+        return {
+            "emergency_p95_latency_ms": self.emergency_p95_latency_ms,
+            "throughput_mbps": self.throughput_mbps,
+            "packet_loss_percent": self.packet_loss_percent,
+            "link_utilization_percent": self.link_utilization_percent,
+        }
+
+
+@dataclass(frozen=True)
+class MetricSnapshot:
+    """一次 Mininet 验证的基线与策略后指标，禁止以模拟数值代替任一侧。"""
+
+    plan_id: str
+    baseline: TrafficMetrics
+    applied: TrafficMetrics
+
+    def to_dict(self) -> dict[str, Any]:
+        """转换为 API 和前端可消费的数据。"""
+
+        return {
+            "plan_id": self.plan_id,
+            "baseline": self.baseline.to_dict(),
+            "applied": self.applied.to_dict(),
+        }

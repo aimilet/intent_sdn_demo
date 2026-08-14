@@ -183,12 +183,13 @@ flowchart LR
 
 ### 7.1 拓扑
 
-第一版使用一个 RSU 交换节点、两条到边缘服务节点的核心路径和三类车辆业务：
+第一版使用一个 RSU 交换节点、两条到边缘服务节点的核心路径和四类车辆业务：
 
 ```text
 紧急车辆 ─┐
-导航车辆 ─┼─ RSU ── 低时延路径：20 Mbps / 5 ms ── Edge
-视频车辆 ─┘       └─ 高容量路径：50 Mbps / 15 ms ── Edge
+控制车辆 ─┼─ RSU ── 低时延路径：20 Mbps / 5 ms ── Edge
+导航车辆 ─┼─       └─ 高容量路径：50 Mbps / 15 ms ── Edge
+视频车辆 ─┘
 ```
 
 - 紧急、控制/导航、视频业务使用固定 IP 与端口分类。
@@ -201,7 +202,7 @@ Mininet 使用真实 Linux 网络栈和 OpenFlow 交换机，适合在单机上�
 
 ### 7.2 指标与验收
 
-确认下发前后分别采集：
+每次确认下发创建一套独立临时拓扑：先保持基线流表，在相同视频压力下采集基线；再应用已确认的模板，采集策略后结果。两组结果必须成对返回，不以估算值代替任一侧。采集指标为：
 
 - 紧急业务的 P95 往返时延。
 - 各业务吞吐量。
@@ -209,7 +210,7 @@ Mininet 使用真实 Linux 网络栈和 OpenFlow 交换机，适合在单机上�
 - 两条核心路径的链路利用率。
 - 策略是否覆盖硬目标及其失败原因。
 
-OVS QoS 实现优先使用出口整形与队列；入口 policing 超额时会直接丢包，不能替代优先级队列。[OVS QoS 文档](https://docs.openvswitch.org/en/latest/howto/qos/)
+OVS QoS 实现优先使用出口整形与队列；入口 policing 超额时会直接丢包，不能替代优先级队列。队列配置后必须由 OpenFlow `set_queue` 流表选用；OpenFlow 1.3 调用 `ovs-ofctl` 时也必须显式使用 `-O OpenFlow13`。临时拓扑结束时，除解绑端口 QoS 外，还要销毁本次带所有者标记的 QoS 和 Queue 记录，避免 OVSDB 留下孤立资源。[OVS QoS FAQ](https://docs.openvswitch.org/en/stable/faq/qos/)、[OVS OpenFlow FAQ](https://docs.openvswitch.org/en/stable/faq/openflow/)
 
 ## 8. 对外接口与页面流程
 
@@ -220,8 +221,8 @@ OVS QoS 实现优先使用出口整形与队列；入口 policing 超额时会�
 | `POST /api/intents/parse` | 输入文字、语音转写或 JSON，返回校验后的 `IntentEnvelope` |
 | `POST /api/policies/compile` | 输入单个 `envelope` 或多个 `envelopes`，汇总后返回候选及最终 `DecisionBundle` |
 | `POST /api/policies/apply` | 对已预览的 `plan_id` 执行固定下发动作 |
-| `POST /api/policies/reset` | 恢复基线流表与 QoS |
-| `GET /api/metrics` | 返回基线或当前策略下的指标 |
+| `POST /api/policies/reset` | 清除服务内的预览和指标缓存；临时拓扑在每次验证结束时已停止 |
+| `GET /api/metrics` | 返回最近一次验证的基线和策略后成对指标；未验证时返回 `not_available` |
 
 页面固定采用“输入、结构化意图、仲裁预览、拓扑与指标”四栏，并将“确认下发”和“重置”作为显式操作：
 
@@ -240,7 +241,7 @@ OVS QoS 实现优先使用出口整形与队列；入口 policing 超额时会�
 - 不在日志、接口响应或页面中返回 API 密钥、完整请求头或环境变量。
 - 外部文本绝不拼接为 Shell 命令；执行层仅接受内部生成的模板标识和拓扑常量。
 - 模型超时、网络失败、Schema 校验失败、拓扑不存在和硬约束冲突均 fail-fast，保留面向用户的原因。
-- 下发、重复下发和重置必须幂等；失败后清理本次创建的 QoS 和流表项。
+- 下发在执行器中串行化；重复确认会独立创建和清理临时拓扑，重置只清除服务缓存。失败后清理本次创建的 QoS 和流表项。
 
 ## 10. 测试计划
 

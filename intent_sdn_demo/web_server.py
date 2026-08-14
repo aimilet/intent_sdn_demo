@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import mimetypes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import ClassVar
 from urllib.parse import urlparse
 
@@ -16,6 +18,12 @@ from intent_sdn_demo.service import IntentSdnService
 
 LOGGER = logging.getLogger(__name__)
 MAX_REQUEST_BYTES = 64 * 1024
+STATIC_DIRECTORY = Path(__file__).with_name("web")
+STATIC_FILES = {
+    "/": "index.html",
+    "/app.js": "app.js",
+    "/styles.css": "styles.css",
+}
 
 
 class IntentSdnRequestHandler(BaseHTTPRequestHandler):
@@ -24,7 +32,7 @@ class IntentSdnRequestHandler(BaseHTTPRequestHandler):
     service: ClassVar[IntentSdnService]
 
     def do_GET(self) -> None:  # noqa: N802
-        """返回健康状态、固定拓扑或最小 API 说明。"""
+        """返回健康状态、固定拓扑、指标或受控的本地静态页面资源。"""
 
         path = urlparse(self.path).path
         if path == "/api/health":
@@ -33,19 +41,12 @@ class IntentSdnRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/topology":
             self._send_json(HTTPStatus.OK, self.service.topology_snapshot())
             return
-        if path == "/":
-            self._send_json(
-                HTTPStatus.OK,
-                {
-                    "service": "intent-sdn-demo",
-                    "endpoints": [
-                        "GET /api/health",
-                        "GET /api/topology",
-                        "POST /api/intents/parse",
-                        "POST /api/policies/compile",
-                    ],
-                },
-            )
+        if path == "/api/metrics":
+            self._send_json(HTTPStatus.OK, self.service.metrics_snapshot())
+            return
+        static_name = STATIC_FILES.get(path)
+        if static_name is not None:
+            self._send_static_file(static_name)
             return
         self._send_error_json(HTTPStatus.NOT_FOUND, "not_found", "请求的资源不存在。")
 
@@ -60,6 +61,12 @@ class IntentSdnRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/policies/compile":
                 self._send_json(HTTPStatus.OK, self.service.compile_request(payload).to_dict())
+                return
+            if path == "/api/policies/apply":
+                self._send_json(HTTPStatus.OK, self.service.apply_request(payload))
+                return
+            if path == "/api/policies/reset":
+                self._send_json(HTTPStatus.OK, self.service.reset_request())
                 return
             self._send_error_json(HTTPStatus.NOT_FOUND, "not_found", "请求的资源不存在。")
         except IntentError as exc:
@@ -100,6 +107,24 @@ class IntentSdnRequestHandler(BaseHTTPRequestHandler):
 
         self._send_json(status, {"error": {"code": code, "message": message}})
 
+    def _send_static_file(self, file_name: str) -> None:
+        """只从预定义清单读取页面资源，避免 URL 路径穿越到工作目录外。"""
+
+        file_path = STATIC_DIRECTORY / file_name
+        try:
+            data = file_path.read_bytes()
+        except OSError:
+            LOGGER.exception("静态页面资源不可读取：%s", file_name)
+            self._send_error_json(HTTPStatus.NOT_FOUND, "not_found", "请求的资源不存在。")
+            return
+        content_type, _ = mimetypes.guess_type(file_name)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", f"{content_type or 'application/octet-stream'}; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def log_message(self, format: str, *args: object) -> None:
         """只记录请求方法和状态等 HTTP 元信息，避免默认日志包含查询或正文。"""
 
@@ -107,12 +132,17 @@ class IntentSdnRequestHandler(BaseHTTPRequestHandler):
         LOGGER.info("HTTP 请求完成：方法=%s，状态=%s", self.command, status)
 
 
-def create_server(port: int = 8765, service: IntentSdnService | None = None) -> ThreadingHTTPServer:
+def create_server(
+    port: int = 8765,
+    service: IntentSdnService | None = None,
+    *,
+    mininet_enabled: bool = False,
+) -> ThreadingHTTPServer:
     """创建回环地址服务器，供测试和命令行入口复用。"""
 
     if not 0 <= port <= 65535:
         raise ValueError("端口必须在 0 到 65535 之间。")
-    IntentSdnRequestHandler.service = service or IntentSdnService()
+    IntentSdnRequestHandler.service = service or IntentSdnService(mininet_enabled=mininet_enabled)
     return ThreadingHTTPServer(("127.0.0.1", port), IntentSdnRequestHandler)
 
 
@@ -121,9 +151,14 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="启动车联网通信意图转译本地服务。")
     parser.add_argument("--port", type=int, default=8765, help="本地监听端口，默认 8765。")
+    parser.add_argument(
+        "--enable-mininet",
+        action="store_true",
+        help="启用临时 Mininet 策略验证；该模式需要 root 权限。",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    server = create_server(args.port)
+    server = create_server(args.port, mininet_enabled=args.enable_mininet)
     LOGGER.info("意图转译服务已启动：http://127.0.0.1:%s", args.port)
     try:
         server.serve_forever()
