@@ -1,0 +1,9 @@
+[project]
+name = "intent-sdn-demo"
+version = "0.1.0"
+description = "车联网通信意图转译与 SDN 策略下发演示。"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false

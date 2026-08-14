@@ -218,7 +218,7 @@ OVS QoS 实现优先使用出口整形与队列；入口 policing 超额时会�
 | 接口 | 作用 |
 |---|---|
 | `POST /api/intents/parse` | 输入文字、语音转写或 JSON，返回校验后的 `IntentEnvelope` |
-| `POST /api/policies/compile` | 输入 `IntentEnvelope` 和当前拓扑快照，返回候选及最终 `DecisionBundle` |
+| `POST /api/policies/compile` | 输入单个 `envelope` 或多个 `envelopes`，汇总后返回候选及最终 `DecisionBundle` |
 | `POST /api/policies/apply` | 对已预览的 `plan_id` 执行固定下发动作 |
 | `POST /api/policies/reset` | 恢复基线流表与 QoS |
 | `GET /api/metrics` | 返回基线或当前策略下的指标 |
