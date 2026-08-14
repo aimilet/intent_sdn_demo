@@ -105,6 +105,14 @@ class ExecutionHelperTest(unittest.TestCase):
 
         self.assertIn("iperf -s -u -p 5001 & status=$?;", node.commands[0])
 
+    def test_checked_command_keeps_fixed_command_diagnostic_on_failure(self) -> None:
+        """受控命令失败时应保留其输出，便于定位 OVS 或 Mininet 的具体错误。"""
+
+        node = RecordingCommandNode("OFPT_ERROR: bad meter__intent_sdn_status__1")
+
+        with self.assertRaisesRegex(RuntimeError, "OFPT_ERROR: bad meter"):
+            _run_checked(node, "ovs-ofctl -O OpenFlow13 del-meters rsu meter=2")
+
     def test_port_tx_bytes_and_utilization_are_calculated_from_counter_deltas(self) -> None:
         """路径利用率应取 RSU 出口实际字节增量，不能依据业务类型推断所属路径。"""
 
@@ -149,7 +157,7 @@ class ExecutionHelperTest(unittest.TestCase):
         MininetExecutor()._clear_qos(rsu, ports, video_meter_id=2)
 
         commands = "\n".join(rsu.commands)
-        self.assertIn("del-meters rsu 2", commands)
+        self.assertIn("del-meters rsu meter=2", commands)
         self.assertIn("clear Port rsu-eth1 qos", commands)
         self.assertIn("clear Port rsu-eth2 qos", commands)
         self.assertIn(f"destroy QoS {qos_id}", commands)

@@ -502,7 +502,11 @@ def _add_meter(switch, meter_id: int, max_rate_mbps: float) -> None:
 def _delete_meter(switch, meter_id: int) -> None:
     """删除本次已成功创建的固定计量器，避免临时桥状态残留。"""
 
-    _run_checked(switch, f"ovs-ofctl -O OpenFlow13 del-meters {switch.name} {meter_id}")
+    # ovs-ofctl 的单计量器删除参数沿用 Meter Syntax，必须为 meter=<id>，不能传裸数字。
+    _run_checked(
+        switch,
+        f"ovs-ofctl -O OpenFlow13 del-meters {switch.name} meter={meter_id}",
+    )
 
 
 def _run_checked(node, command: str, *, background: bool = False) -> str:
@@ -519,7 +523,9 @@ def _run_checked(node, command: str, *, background: bool = False) -> str:
         raise RuntimeError("未取得受控命令的退出状态。")
     status = output[position + len(marker) :].strip()
     if status != "0":
-        raise RuntimeError("受控网络命令执行失败。")
+        diagnostic = " ".join(output[:position].split())[-500:]
+        detail = f" 输出：{diagnostic}" if diagnostic else ""
+        raise RuntimeError(f"受控网络命令执行失败。{detail}")
     return output[:position]
 
 

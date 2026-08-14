@@ -212,7 +212,7 @@ Mininet 使用真实 Linux 网络栈和 OpenFlow 交换机，适合在单机上�
 - 两条核心路径的链路利用率。
 - 策略是否覆盖硬目标及其失败原因。
 
-OVS QoS 使用出口整形与队列，队列配置后必须由 OpenFlow `set_queue` 流表选用；OpenFlow 1.3 调用 `ovs-ofctl` 时也必须显式使用 `-O OpenFlow13`。在本 Demo 的 TCLink 拓扑中，背景视频的 8 Mbps 硬上限还由 OpenFlow 1.3 丢弃型计量器执行，避免队列仅被选择却没有实际整形时将未达标策略报告为成功；测量值超过 8.5 Mbps 时本次执行必须失败。临时拓扑结束时，除解绑端口 QoS、销毁带所有者标记的 QoS 和 Queue 记录外，还要删除本次已创建的计量器。[OVS QoS FAQ](https://docs.openvswitch.org/en/stable/faq/qos/)、[OVS 流动作与 `set_queue` 文档](https://docs.openvswitch.org/en/stable/ref/ovs-actions.7/)、[OVS `ovs-ofctl` 计量器命令参考](https://www.openvswitch.org/support/dist-docs/ovs-ofctl.8.html)
+OVS QoS 使用出口整形与队列，队列配置后必须由 OpenFlow `set_queue` 流表选用；OpenFlow 1.3 调用 `ovs-ofctl` 时也必须显式使用 `-O OpenFlow13`。在本 Demo 的 TCLink 拓扑中，背景视频的 8 Mbps 硬上限还由 OpenFlow 1.3 丢弃型计量器执行，避免队列仅被选择却没有实际整形时将未达标策略报告为成功；测量值超过 8.5 Mbps 时本次执行必须失败。临时拓扑结束时，除解绑端口 QoS、销毁带所有者标记的 QoS 和 Queue 记录外，还要以 `del-meters <bridge> meter=<id>` 删除本次已创建的计量器。受控命令失败会保留固定命令的 OVS 诊断输出。[OVS QoS FAQ](https://docs.openvswitch.org/en/stable/faq/qos/)、[OVS 流动作与 `set_queue` 文档](https://docs.openvswitch.org/en/stable/ref/ovs-actions.7/)、[OVS `ovs-ofctl` 计量器命令参考](https://www.openvswitch.org/support/dist-docs/ovs-ofctl.8.html)
 
 ## 8. 对外接口与页面流程
 
