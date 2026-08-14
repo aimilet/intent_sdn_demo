@@ -305,7 +305,8 @@ class MininetExecutor:
         for port in (5001, 5002, 5003, 5004):
             _run_checked(
                 edge,
-                f"iperf -s -u -p {port} > /tmp/{_OWNER}-{port}.log 2>&1 &",
+                f"iperf -s -u -p {port} > /tmp/{_OWNER}-{port}.log 2>&1",
+                background=True,
             )
 
     def _measure(self, hosts) -> TrafficMetrics:
@@ -385,11 +386,15 @@ def _add_flow(switch, match: str, actions: str, *, priority: int = 100) -> None:
     )
 
 
-def _run_checked(node, command: str) -> str:
-    """运行内部固定命令并检查 shell 返回码，拒绝静默的 OVS 或 iperf 失败。"""
+def _run_checked(node, command: str, *, background: bool = False) -> str:
+    """以单行脚本运行内部固定命令并检查状态，兼容 Mininet 的提示符完成语义。"""
 
     marker = "__intent_sdn_status__"
-    output = node.cmd(f"{command}\nprintf '{marker}%s' $?")
+    if background:
+        script = f"{command} & status=$?; printf '{marker}%s' $status"
+    else:
+        script = f"{command}; status=$?; printf '{marker}%s' $status"
+    output = node.cmd(script)
     position = output.rfind(marker)
     if position < 0:
         raise RuntimeError("未取得受控命令的退出状态。")

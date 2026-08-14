@@ -13,6 +13,7 @@ from intent_sdn_demo.execution import (
     _parse_loss,
     _parse_throughput,
     _p95_ping_latency,
+    _run_checked,
 )
 
 
@@ -77,6 +78,26 @@ class ExecutionHelperTest(unittest.TestCase):
         self.assertEqual(network.hosts, list(_HOST_NAMES.values()))
         self.assertTrue(all(len(f"{name}-eth0") <= 15 for name in network.hosts))
 
+    def test_checked_command_uses_one_shell_line_and_parses_status(self) -> None:
+        """Mininet 会在每行结束时返回提示符，状态标记必须与命令位于同一行。"""
+
+        node = RecordingCommandNode("结果__intent_sdn_status__0")
+
+        output = _run_checked(node, "ovs-ofctl -O OpenFlow13 del-flows rsu")
+
+        self.assertEqual(output, "结果")
+        self.assertNotIn("\n", node.commands[0])
+        self.assertIn("; status=$?; printf", node.commands[0])
+
+    def test_checked_background_command_uses_valid_async_shell_form(self) -> None:
+        """后台服务命令由检查器追加异步分隔符，调用方不再拼接可能无效的 &;。"""
+
+        node = RecordingCommandNode("__intent_sdn_status__0")
+
+        _run_checked(node, "iperf -s -u -p 5001", background=True)
+
+        self.assertIn("iperf -s -u -p 5001 & status=$?;", node.commands[0])
+
 
 class FakeHost:
     """只模拟静态 ARP 配置需要的 Mininet Host 接口。"""
@@ -129,3 +150,19 @@ class RecordingNetwork:
         """接受固定链路定义；本测试不需要真实 Link 对象。"""
 
         return object()
+
+
+class RecordingCommandNode:
+    """模拟 Mininet 节点命令输出，用于验证单行状态检查脚本。"""
+
+    def __init__(self, output: str) -> None:
+        """保存固定输出和执行脚本记录。"""
+
+        self._output = output
+        self.commands: list[str] = []
+
+    def cmd(self, command: str) -> str:
+        """记录脚本并返回预置的 Mininet 命令输出。"""
+
+        self.commands.append(command)
+        return self._output
