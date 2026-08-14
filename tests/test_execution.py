@@ -173,7 +173,10 @@ class ExecutionHelperTest(unittest.TestCase):
         _add_meter(rsu, 2, 8.0)
 
         self.assertIn("-O OpenFlow13 add-meter rsu", rsu.commands[0])
-        self.assertIn("meter=2,kbps,band=type=drop,rate=8000", rsu.commands[0])
+        self.assertIn(
+            "meter=2,kbps,burst,band=type=drop,rate=8000,burst_size=64",
+            rsu.commands[0],
+        )
 
     def test_congestion_metric_validation_rejects_unmet_video_rate(self) -> None:
         """模板承诺视频不超过 8 Mbps 时，超出容差的实测结果必须明确失败。"""

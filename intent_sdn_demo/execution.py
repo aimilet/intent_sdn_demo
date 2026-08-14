@@ -26,6 +26,8 @@ _OWNER = "intent-sdn-demo"
 _PATH_CAPACITY_MBPS = {"low_latency": 20.0, "high_capacity": 50.0}
 _VIDEO_METER_ID = 2
 _VIDEO_MAX_RATE_MBPS = 8.0
+# 显式限制 token bucket 突发，避免 OVS 自行选择较大的默认 burst 导致窗口均值越界。
+_VIDEO_METER_BURST_KBPS = 64
 # iperf 的窗口统计和 OpenFlow token bucket 都会产生极小波动；超过该值视为限速未生效。
 _VIDEO_MAX_RATE_TOLERANCE_MBPS = 0.5
 _SWITCH_DPIDS = {
@@ -495,7 +497,8 @@ def _add_meter(switch, meter_id: int, max_rate_mbps: float) -> None:
     _run_checked(
         switch,
         f"ovs-ofctl -O OpenFlow13 add-meter {switch.name} "
-        f"'meter={meter_id},kbps,band=type=drop,rate={rate_kbps}'",
+        f"'meter={meter_id},kbps,burst,band=type=drop,rate={rate_kbps},"
+        f"burst_size={_VIDEO_METER_BURST_KBPS}'",
     )
 
 
