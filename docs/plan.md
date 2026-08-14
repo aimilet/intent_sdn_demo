@@ -193,6 +193,7 @@ flowchart LR
 ```
 
 - 紧急、控制/导航、视频业务使用固定 IP 与端口分类。
+- RSU、两条路径交换机和边缘侧交换机保留可读的展示名称，但显式配置唯一 16 位十六进制 DPID；Mininet 仅能从 `s1` 一类规范名称自动推导 DPID。[Mininet Switch API](https://mininet.org/api/classmininet_1_1node_1_1Switch.html)
 - 基线状态将压力流量置于低时延路径，制造可观察的竞争。
 - `critical_priority` 将紧急流量固定到低时延路径和高优先级队列。
 - `congestion_relief` 将视频流量切到高容量路径并限制为 8 Mbps。

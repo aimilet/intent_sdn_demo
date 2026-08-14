@@ -6,7 +6,13 @@ import unittest
 from unittest.mock import patch
 
 from intent_sdn_demo.errors import IntentError
-from intent_sdn_demo.execution import MininetExecutor, _parse_loss, _parse_throughput, _p95_ping_latency
+from intent_sdn_demo.execution import (
+    MininetExecutor,
+    _SWITCH_DPIDS,
+    _parse_loss,
+    _parse_throughput,
+    _p95_ping_latency,
+)
 
 
 class ExecutionHelperTest(unittest.TestCase):
@@ -42,6 +48,24 @@ class ExecutionHelperTest(unittest.TestCase):
         self.assertEqual(hosts["first"].arp_entries, [("10.0.0.100", "00:00:00:00:00:64")])
         self.assertEqual(hosts["second"].arp_entries, [("10.0.0.11", "00:00:00:00:00:11")])
 
+    def test_topology_uses_explicit_unique_dpids_for_display_switch_names(self) -> None:
+        """非 s数字 的展示名称必须显式携带唯一 DPID，避免 Mininet 自动推导失败。"""
+
+        network = RecordingNetwork()
+
+        MininetExecutor()._build_topology(network)
+
+        self.assertEqual(
+            {name: parameters["dpid"] for name, parameters in network.switches.items()},
+            {
+                "rsu": _SWITCH_DPIDS["rsu"],
+                "low": _SWITCH_DPIDS["low"],
+                "high": _SWITCH_DPIDS["high"],
+                "edgeSwitch": _SWITCH_DPIDS["edge"],
+            },
+        )
+        self.assertEqual(len(set(_SWITCH_DPIDS.values())), 4)
+
 
 class FakeHost:
     """只模拟静态 ARP 配置需要的 Mininet Host 接口。"""
@@ -67,3 +91,28 @@ class FakeHost:
         """记录静态邻居关系，匹配 Mininet 的公开 API 命名。"""
 
         self.arp_entries.append((address, mac))
+
+
+class RecordingNetwork:
+    """记录拓扑构造调用，避免测试为了 DPID 断言而创建真实网络命名空间。"""
+
+    def __init__(self) -> None:
+        """初始化受控节点和交换机参数记录。"""
+
+        self.switches: dict[str, dict[str, object]] = {}
+
+    def addHost(self, name: str, **_parameters):  # noqa: N802
+        """返回可被 addLink 引用的轻量主机占位对象。"""
+
+        return name
+
+    def addSwitch(self, name: str, **parameters):  # noqa: N802
+        """记录构造器收到的 DPID 和 OpenFlow 参数。"""
+
+        self.switches[name] = parameters
+        return name
+
+    def addLink(self, *_nodes, **_parameters):  # noqa: N802
+        """接受固定链路定义；本测试不需要真实 Link 对象。"""
+
+        return object()

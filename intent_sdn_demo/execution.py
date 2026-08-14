@@ -18,6 +18,12 @@ _PING_TIME_PATTERN = re.compile(r"time[=<]([0-9.]+)\s*ms")
 _IPERF_THROUGHPUT_PATTERN = re.compile(r"([0-9.]+)\s+Mbits/sec")
 _IPERF_LOSS_PATTERN = re.compile(r"\(([0-9.]+)%\)")
 _OWNER = "intent-sdn-demo"
+_SWITCH_DPIDS = {
+    "rsu": "0000000000000001",
+    "low": "0000000000000002",
+    "high": "0000000000000003",
+    "edge": "0000000000000004",
+}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -132,10 +138,31 @@ class MininetExecutor:
         navigation = network.addHost("vehNavigation", ip="10.0.0.13/24")
         video = network.addHost("vehVideo", ip="10.0.0.14/24")
         edge = network.addHost("edge", ip="10.0.0.100/24")
-        rsu = network.addSwitch("rsu", protocols="OpenFlow13", failMode="secure")
-        low = network.addSwitch("low", protocols="OpenFlow13", failMode="secure")
-        high = network.addSwitch("high", protocols="OpenFlow13", failMode="secure")
-        edge_switch = network.addSwitch("edgeSwitch", protocols="OpenFlow13", failMode="secure")
+        # Mininet 只会从 s1 一类规范名称推导 DPID；展示名称需显式给出稳定十六进制 DPID。
+        rsu = network.addSwitch(
+            "rsu",
+            dpid=_SWITCH_DPIDS["rsu"],
+            protocols="OpenFlow13",
+            failMode="secure",
+        )
+        low = network.addSwitch(
+            "low",
+            dpid=_SWITCH_DPIDS["low"],
+            protocols="OpenFlow13",
+            failMode="secure",
+        )
+        high = network.addSwitch(
+            "high",
+            dpid=_SWITCH_DPIDS["high"],
+            protocols="OpenFlow13",
+            failMode="secure",
+        )
+        edge_switch = network.addSwitch(
+            "edgeSwitch",
+            dpid=_SWITCH_DPIDS["edge"],
+            protocols="OpenFlow13",
+            failMode="secure",
+        )
 
         links = {
             "emergency": network.addLink(emergency, rsu, bw=100, delay="1ms"),
