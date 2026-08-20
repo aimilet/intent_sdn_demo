@@ -21,6 +21,8 @@ from intent_sdn_demo.validation import reject_unknown_fields
 
 LOGGER = logging.getLogger(__name__)
 MAX_LLM_CONFIG_BYTES = 16 * 1024
+MAX_LLM_RESPONSE_BYTES = 1024 * 1024
+SUPPORTED_LLM_PROVIDERS = frozenset({"openai", "ollama"})
 
 
 class IntentExtractor(Protocol):
@@ -32,11 +34,12 @@ class IntentExtractor(Protocol):
 
 @dataclass(frozen=True)
 class LlmConfig:
-    """远程 OpenAI 兼容接口所需配置，不将密钥写入日志或响应。"""
+    """远程聊天模型接口配置，不将密钥写入日志或响应。"""
 
     base_url: str
     api_key: str
     model: str
+    provider: str = "openai"
     timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
@@ -45,6 +48,13 @@ class LlmConfig:
         base_url = self.base_url.strip() if isinstance(self.base_url, str) else ""
         api_key = self.api_key.strip() if isinstance(self.api_key, str) else ""
         model = self.model.strip() if isinstance(self.model, str) else ""
+        provider = self.provider.strip() if isinstance(self.provider, str) else ""
+        if provider not in SUPPORTED_LLM_PROVIDERS:
+            raise IntentError(
+                "invalid_llm_config",
+                "LLM provider 只支持 openai 或 ollama。",
+                503,
+            )
         if not base_url or len(base_url) > 2048:
             raise IntentError(
                 "invalid_llm_config",
@@ -79,6 +89,7 @@ class LlmConfig:
         object.__setattr__(self, "base_url", base_url)
         object.__setattr__(self, "api_key", api_key)
         object.__setattr__(self, "model", model)
+        object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
 
     @classmethod
@@ -94,7 +105,7 @@ class LlmConfig:
                 "文字和语音意图解析未配置远程模型，请设置 LLM_BASE_URL、LLM_API_KEY 和 LLM_MODEL。",
                 503,
             )
-        return cls(base_url=base_url, api_key=api_key, model=model)
+        return cls(base_url=base_url, api_key=api_key, model=model, provider="openai")
 
     @classmethod
     def from_json_file(cls, file_path: str | os.PathLike[str]) -> "LlmConfig":
@@ -129,7 +140,7 @@ class LlmConfig:
             str(key)
             for key in data
             if not isinstance(key, str)
-            or key not in {"base_url", "api_key", "model", "timeout_seconds"}
+            or key not in {"provider", "base_url", "api_key", "model", "timeout_seconds"}
         )
         if unknown_fields:
             raise IntentError(
@@ -144,14 +155,21 @@ class LlmConfig:
             base_url=base_url,
             api_key=api_key,
             model=model,
+            provider=data.get("provider", "openai"),
             timeout_seconds=data.get("timeout_seconds", 30.0),
         )
 
     @property
     def endpoint(self) -> str:
-        """兼容传入服务根地址或完整 chat completions 地址的配置方式。"""
+        """按提供方兼容服务根地址、API 根地址或完整聊天端点。"""
 
         base_url = self.base_url.rstrip("/")
+        if self.provider == "ollama":
+            if base_url.endswith("/api/chat"):
+                return base_url
+            if base_url.endswith("/api"):
+                return f"{base_url}/chat"
+            return f"{base_url}/api/chat"
         if base_url.endswith("/chat/completions"):
             return base_url
         if base_url.endswith("/v1"):
@@ -192,7 +210,7 @@ def _is_valid_base_url(value: str) -> bool:
 
 
 class RemoteIntentExtractor:
-    """使用 OpenAI 兼容接口进行 JSON 抽取，后续仍由本地规则完整校验。"""
+    """使用 OpenAI 兼容或 Ollama 原生接口抽取 JSON，并交给本地规则校验。"""
 
     def __init__(self, config: LlmConfig | None = None) -> None:
         self._config = config
@@ -201,22 +219,8 @@ class RemoteIntentExtractor:
         """调用远程模型并只接受包含 intents 的合法 JSON 对象。"""
 
         config = self._config or LlmConfig.from_environment()
-        body = {
-            "model": config.model,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": _system_prompt()},
-                {
-                    "role": "user",
-                    "content": (
-                        f"提交者角色固定为 {actor_role.value}。仅解析下列原文，"
-                        "不要输出角色、命令、路径、端口、队列编号或未出现的数值。\n"
-                        f"原文：{text}"
-                    ),
-                },
-            ],
-        }
+        messages = _messages(text, actor_role)
+        body = _request_body(config, messages)
         request = Request(
             config.endpoint,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -226,12 +230,46 @@ class RemoteIntentExtractor:
             },
             method="POST",
         )
-        LOGGER.info("提交远程意图抽取请求：角色=%s，文本长度=%s", actor_role.value, len(text))
+        LOGGER.info(
+            "提交远程意图抽取请求：提供方=%s，角色=%s，文本长度=%s",
+            config.provider,
+            actor_role.value,
+            len(text),
+        )
         try:
             with urlopen(request, timeout=config.timeout_seconds) as response:
-                raw_response = response.read().decode("utf-8")
+                raw_bytes = response.read(MAX_LLM_RESPONSE_BYTES + 1)
+                if len(raw_bytes) > MAX_LLM_RESPONSE_BYTES:
+                    raise IntentError(
+                        "invalid_llm_output",
+                        "远程模型响应超过 1 MiB 限制。",
+                        422,
+                    )
+                raw_response = raw_bytes.decode("utf-8")
         except HTTPError as exc:
-            LOGGER.warning("远程意图抽取服务返回 HTTP 状态：%s", exc.code)
+            LOGGER.warning(
+                "远程意图抽取服务返回 HTTP 状态：提供方=%s，状态=%s",
+                config.provider,
+                exc.code,
+            )
+            if exc.code in {401, 403}:
+                raise IntentError(
+                    "llm_auth_failed",
+                    "远程模型认证或模型访问权限被拒绝，请检查 API Key 和模型权限。",
+                    503,
+                ) from exc
+            if exc.code == 404:
+                raise IntentError(
+                    "llm_endpoint_not_found",
+                    "远程模型接口或模型不存在，请检查 provider、base_url 和 model。",
+                    503,
+                ) from exc
+            if exc.code == 429:
+                raise IntentError(
+                    "llm_rate_limited",
+                    "远程模型服务已限流，请稍后重试。",
+                    503,
+                ) from exc
             raise IntentError("llm_request_failed", "远程意图抽取服务拒绝了请求。", 503) from exc
         except UnicodeDecodeError as exc:
             LOGGER.warning("远程意图抽取服务返回了非 UTF-8 响应。")
@@ -242,14 +280,64 @@ class RemoteIntentExtractor:
 
         try:
             response_data = json.loads(raw_response)
-            content = response_data["choices"][0]["message"]["content"]
+            content = _response_content(config, response_data)
             extracted = json.loads(content)
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise IntentError("invalid_llm_output", "远程模型未返回合法的意图 JSON。", 422) from exc
         if not isinstance(extracted, Mapping):
             raise IntentError("invalid_llm_output", "远程模型返回的意图 JSON 必须是对象。", 422)
         reject_unknown_fields(extracted, frozenset({"intents"}), "模型输出")
         return extracted
+
+
+def _messages(text: str, actor_role: ActorRole) -> list[dict[str, str]]:
+    """构造两种协议共用的受限系统指令和用户原文消息。"""
+
+    return [
+        {"role": "system", "content": _system_prompt()},
+        {
+            "role": "user",
+            "content": (
+                f"提交者角色固定为 {actor_role.value}。仅解析下列原文，"
+                "不要输出角色、命令、路径、端口、队列编号或未出现的数值。\n"
+                f"原文：{text}"
+            ),
+        },
+    ]
+
+
+def _request_body(
+    config: LlmConfig, messages: list[dict[str, str]]
+) -> dict[str, object]:
+    """按提供方生成请求体；Ollama Cloud 不声明其不支持的 structured outputs。"""
+
+    if config.provider == "ollama":
+        return {
+            "model": config.model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": 0},
+        }
+    return {
+        "model": config.model,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": messages,
+    }
+
+
+def _response_content(config: LlmConfig, response_data: object) -> str:
+    """从对应协议的非流式响应中读取文本，拒绝缺失或非字符串内容。"""
+
+    if not isinstance(response_data, Mapping):
+        raise ValueError("远程响应必须是对象。")
+    if config.provider == "ollama":
+        content = response_data["message"]["content"]
+    else:
+        content = response_data["choices"][0]["message"]["content"]
+    if not isinstance(content, str) or not content:
+        raise ValueError("远程响应 content 必须是非空字符串。")
+    return content
 
 
 def _system_prompt() -> str:

@@ -12,6 +12,7 @@
 - 不可替换的确定性安全评价会约束可替换评价器和选择器，伪造可行性、硬目标状态或候选计划不能进入预览缓存。
 - 任意新编译请求都会清除旧预览和旧实测缓存，阻断结果不能确认历史计划。
 - `--llm-config` 可加载本地 JSON 模型配置；重复/未知字段、超大或非 UTF-8 文件、非法 HTTP(S) 地址和越界超时均在网络请求前拒绝，环境变量可按字段安全覆盖文件值。
+- `provider=openai` 与 `provider=ollama` 分别生成 Chat Completions 和 Ollama `/api/chat` 请求，并按各自响应结构取回内容；Ollama 分支关闭流式响应且不伪装 structured outputs，401/403、404、429 和超大响应均受控处理。
 
 独立功能 Review 共执行三轮，覆盖入口校验、Grounding 数据流、候选与执行边界、并发状态、异常路径、界面输出、测试和文档。Review 发现的编译/执行状态交错、评价器修改候选或伪造安全状态、选择器返回未验证结果、旧版 `Intent` 往返、非 UTF-8 模型响应、证据来源校验以及 `compile` 双入口歧义均已修复并补充回归测试；最终复审无功能或安全阻断项。
 
@@ -20,9 +21,11 @@
 | 验证项 | 结果 |
 |---|---|
 | `python3 -m compileall -q intent_sdn_demo tests` | 通过 |
-| `python3 -m unittest discover -s tests -v` | 共运行 56 项：55 项通过，1 项因当前沙箱禁止监听本地端口而跳过 |
+| `python3 -m unittest discover -s tests -v` | 共运行 60 项：59 项通过，1 项因当前沙箱禁止监听本地端口而跳过 |
 | `node --check intent_sdn_demo/web/app.js` | 通过 |
 | `git diff --check` | 通过 |
+
+本次尝试使用本地忽略配置中的 API Key 对 Ollama Cloud 发起最小真实抽取，但沙箱内 DNS 被禁止，提升权限又因外发数据与密钥风险被安全审查拒绝，因此没有实际请求发送。双协议请求体、响应解析和错误路径已由不访问网络的自动化测试覆盖；真实 Cloud 端到端仍需在用户本机重启服务后验证。
 
 本次未在当前沙箱重新执行 root Mininet/OVS 集成。执行器、固定 OpenFlow/OVS 动作和既有真实验收场景未被修改；下列 2026-08-14 记录仍用于证明该执行链的既有实测结果。第二版新增的 Grounding 和候选评价链已经由不依赖模型密钥、Mininet 和 root 权限的自动化测试覆盖。
 

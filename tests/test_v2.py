@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Event, Thread
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from intent_sdn_demo.errors import IntentError
 from intent_sdn_demo.extractor import LlmConfig, RemoteIntentExtractor
@@ -574,7 +575,7 @@ class V2InputIsolationTest(unittest.TestCase):
             def __exit__(self, *_args) -> bool:
                 return False
 
-            def read(self) -> bytes:
+            def read(self, _size: int = -1) -> bytes:
                 return b"\xff"
 
         config = LlmConfig(
@@ -620,6 +621,7 @@ class LlmConfigFileTest(unittest.TestCase):
                 config = LlmConfig.from_json_file(path)
 
         self.assertEqual(config.endpoint, "https://llm.example.test/v1/chat/completions")
+        self.assertEqual(config.provider, "openai")
         self.assertEqual(config.api_key, "file-key")
         self.assertEqual(config.model, "file-model")
         self.assertEqual(config.timeout_seconds, 12.5)
@@ -632,6 +634,7 @@ class LlmConfigFileTest(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
+                        "provider": "ollama",
                         "base_url": "https://file.example.test",
                         "api_key": "file-key",
                         "model": "file-model",
@@ -648,6 +651,8 @@ class LlmConfigFileTest(unittest.TestCase):
                 config = LlmConfig.from_json_file(path)
 
         self.assertEqual(config.base_url, "https://env.example.test")
+        self.assertEqual(config.provider, "ollama")
+        self.assertEqual(config.endpoint, "https://env.example.test/api/chat")
         self.assertEqual(config.api_key, "file-key")
         self.assertEqual(config.model, "env-model")
         self.assertEqual(config.timeout_seconds, 20.0)
@@ -663,6 +668,12 @@ class LlmConfigFileTest(unittest.TestCase):
                 "extra": 1,
             },
             {"base_url": "file:///tmp/model", "api_key": "secret", "model": "m"},
+            {
+                "provider": "unknown",
+                "base_url": "https://llm.test",
+                "api_key": "secret",
+                "model": "m",
+            },
             {"base_url": "https://llm.test:bad", "api_key": "secret", "model": "m"},
             {
                 "base_url": "https://llm.test",
@@ -719,7 +730,12 @@ class LlmConfigFileTest(unittest.TestCase):
             def server_close(self) -> None:
                 self.close_called = True
 
-        config = LlmConfig("https://llm.example.test", "key", "model")
+        config = LlmConfig(
+            "https://ollama.com",
+            "key",
+            "deepseek-v4-flash:0731",
+            provider="ollama",
+        )
         server = FakeServer()
         arguments = ["intent_sdn_demo", "--llm-config", "./llm.json", "--port", "9012"]
         with (
@@ -739,6 +755,122 @@ class LlmConfigFileTest(unittest.TestCase):
         self.assertIs(service._parser._extractor._config, config)
         self.assertTrue(server.serve_called)
         self.assertTrue(server.close_called)
+
+    def test_ollama_provider_uses_native_non_streaming_chat(self) -> None:
+        """Ollama 提供方必须调用 /api/chat 并解析 message.content。"""
+
+        captured: dict[str, object] = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> bool:
+                return False
+
+            def read(self, _size: int = -1) -> bytes:
+                return json.dumps(
+                    {
+                        "model": "deepseek-v4-flash:0731",
+                        "message": {"role": "assistant", "content": '{"intents":[]}'},
+                        "done": True,
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["authorization"] = request.get_header("Authorization")
+            captured["timeout"] = timeout
+            return Response()
+
+        config = LlmConfig(
+            base_url="https://ollama.com",
+            api_key="cloud-key",
+            model="deepseek-v4-flash:0731",
+            provider="ollama",
+            timeout_seconds=60,
+        )
+        with patch("intent_sdn_demo.extractor.urlopen", side_effect=fake_urlopen):
+            extracted = RemoteIntentExtractor(config).extract("救护车消息优先", ActorRole.DISPATCHER)
+
+        self.assertEqual(extracted, {"intents": []})
+        self.assertEqual(captured["url"], "https://ollama.com/api/chat")
+        self.assertEqual(captured["authorization"], "Bearer cloud-key")
+        self.assertEqual(captured["timeout"], 60.0)
+        body = captured["body"]
+        self.assertFalse(body["stream"])
+        self.assertEqual(body["options"], {"temperature": 0})
+        self.assertNotIn("response_format", body)
+        self.assertNotIn("format", body)
+
+    def test_openai_provider_keeps_chat_completions_contract(self) -> None:
+        """默认提供方继续发送 OpenAI JSON mode 请求并解析 choices。"""
+
+        captured: dict[str, object] = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> bool:
+                return False
+
+            def read(self, _size: int = -1) -> bytes:
+                return json.dumps(
+                    {"choices": [{"message": {"content": '{"intents":[]}'}}]}
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return Response()
+
+        config = LlmConfig("https://openai.example.test/v1", "key", "model")
+        with patch("intent_sdn_demo.extractor.urlopen", side_effect=fake_urlopen):
+            extracted = RemoteIntentExtractor(config).extract("视频可以降级", ActorRole.OPERATOR)
+
+        self.assertEqual(extracted, {"intents": []})
+        self.assertEqual(captured["url"], "https://openai.example.test/v1/chat/completions")
+        self.assertEqual(captured["body"]["response_format"], {"type": "json_object"})
+        self.assertNotIn("stream", captured["body"])
+
+    def test_provider_auth_failure_has_specific_safe_error(self) -> None:
+        """上游 401/403 应提供可操作错误，但不得回显密钥或响应正文。"""
+
+        config = LlmConfig(
+            "https://ollama.com",
+            "secret-cloud-key",
+            "deepseek-v4-flash:0731",
+            provider="ollama",
+        )
+        error = HTTPError(config.endpoint, 403, "Forbidden", {}, None)
+        with patch("intent_sdn_demo.extractor.urlopen", side_effect=error):
+            with self.assertRaises(IntentError) as captured:
+                RemoteIntentExtractor(config).extract("紧急消息", ActorRole.DISPATCHER)
+
+        self.assertEqual(captured.exception.code, "llm_auth_failed")
+        self.assertNotIn("secret-cloud-key", captured.exception.message)
+        self.assertIn("API Key", captured.exception.message)
+
+    def test_oversized_remote_response_is_rejected(self) -> None:
+        """远程响应超过固定上限时不得继续解码和反序列化。"""
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> bool:
+                return False
+
+            def read(self, size: int = -1) -> bytes:
+                return b"x" * size
+
+        config = LlmConfig("https://openai.example.test", "key", "model")
+        with patch("intent_sdn_demo.extractor.urlopen", return_value=Response()):
+            with self.assertRaisesRegex(IntentError, "1 MiB") as captured:
+                RemoteIntentExtractor(config).extract("紧急消息", ActorRole.DISPATCHER)
+        self.assertEqual(captured.exception.code, "invalid_llm_output")
 
 
 if __name__ == "__main__":
