@@ -22,7 +22,26 @@ python3 -m intent_sdn_demo --port 8765
 
 ## 文字与语音输入
 
-文字和语音转写文本会调用兼容 Chat Completions 接口的远程模型。启动前在本机终端配置以下环境变量，切勿写入仓库或页面：
+文字和语音转写文本会调用兼容 Chat Completions 接口的远程模型。推荐在仓库根目录创建已被 `.gitignore` 排除的 `llm-config.local.json`：
+
+```json
+{
+  "base_url": "https://模型服务地址/v1",
+  "api_key": "本机私密密钥",
+  "model": "模型名称",
+  "timeout_seconds": 30
+}
+```
+
+然后显式指定该文件启动：
+
+```bash
+python3 -m intent_sdn_demo --llm-config ./llm-config.local.json --port 8765
+```
+
+配置文件必须是 UTF-8 JSON 对象，只允许上述四个字段，大小不能超过 16 KiB；`base_url` 只接受不含账号、查询参数和片段的 HTTP(S) 地址，超时范围为 `(0, 300]` 秒。密钥不会写入日志或接口响应。Linux/macOS 上还应执行 `chmod 600 llm-config.local.json`；也可以把配置放在仓库外并传入绝对路径。
+
+原有环境变量方式继续支持；当同时使用 JSON 文件和环境变量时，非空的三个环境变量会分别覆盖文件中的连接字段，`timeout_seconds` 仍取文件值：
 
 ```bash
 export LLM_BASE_URL='https://模型服务地址'

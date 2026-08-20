@@ -1,6 +1,6 @@
 # Mininet 集成验收记录
 
-## 2026-08-20：第二版语义 Grounding 与决策流水线回归
+## 2026-08-20：第二版语义 Grounding、决策流水线与 LLM 配置回归
 
 本次在不修改 Mininet/OVS 执行动作的前提下，完成 Semantic Intent、服务端版本化 SLA Grounding、受控候选生成、确定性评价与可解释稳定排序的第二版重构。验证覆盖：
 
@@ -11,6 +11,7 @@
 - 没有学习模型时，动态 KPI 逐项返回 `not_available`，不参与效用数值评分，也不冒充 Mininet 实测。
 - 不可替换的确定性安全评价会约束可替换评价器和选择器，伪造可行性、硬目标状态或候选计划不能进入预览缓存。
 - 任意新编译请求都会清除旧预览和旧实测缓存，阻断结果不能确认历史计划。
+- `--llm-config` 可加载本地 JSON 模型配置；重复/未知字段、超大或非 UTF-8 文件、非法 HTTP(S) 地址和越界超时均在网络请求前拒绝，环境变量可按字段安全覆盖文件值。
 
 独立功能 Review 共执行三轮，覆盖入口校验、Grounding 数据流、候选与执行边界、并发状态、异常路径、界面输出、测试和文档。Review 发现的编译/执行状态交错、评价器修改候选或伪造安全状态、选择器返回未验证结果、旧版 `Intent` 往返、非 UTF-8 模型响应、证据来源校验以及 `compile` 双入口歧义均已修复并补充回归测试；最终复审无功能或安全阻断项。
 
@@ -19,7 +20,7 @@
 | 验证项 | 结果 |
 |---|---|
 | `python3 -m compileall -q intent_sdn_demo tests` | 通过 |
-| `python3 -m unittest discover -s tests -v` | 共运行 50 项：49 项通过，1 项因当前沙箱禁止监听本地端口而跳过 |
+| `python3 -m unittest discover -s tests -v` | 共运行 56 项：55 项通过，1 项因当前沙箱禁止监听本地端口而跳过 |
 | `node --check intent_sdn_demo/web/app.js` | 通过 |
 | `git diff --check` | 通过 |
 

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import math
+import tempfile
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 from threading import Event, Thread
 from unittest.mock import patch
 
@@ -28,6 +31,7 @@ from intent_sdn_demo.policy import (
     PolicyCompiler,
 )
 from intent_sdn_demo.service import IntentSdnService
+from intent_sdn_demo.web_server import main as web_server_main
 
 
 def _intent(
@@ -591,6 +595,150 @@ class V2InputIsolationTest(unittest.TestCase):
         decision = service.compile_request({"envelope": envelope.to_dict()})
         self.assertNotIn("rm -rf", str(decision.selected_plan.to_dict()))
         self.assertEqual(decision.selected_plan.to_dict()["actions"][0]["parameters"]["path"], "low-latency-path")
+
+
+class LlmConfigFileTest(unittest.TestCase):
+    """验证本地 JSON 模型配置、环境变量优先级和失败边界。"""
+
+    def test_json_config_loads_and_normalizes_v1_endpoint(self) -> None:
+        """合法文件应加载全部字段，并避免为以 /v1 结尾的地址重复追加版本路径。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "llm.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "https://llm.example.test/v1",
+                        "api_key": "file-key",
+                        "model": "file-model",
+                        "timeout_seconds": 12.5,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                config = LlmConfig.from_json_file(path)
+
+        self.assertEqual(config.endpoint, "https://llm.example.test/v1/chat/completions")
+        self.assertEqual(config.api_key, "file-key")
+        self.assertEqual(config.model, "file-model")
+        self.assertEqual(config.timeout_seconds, 12.5)
+
+    def test_environment_connection_fields_override_json_config(self) -> None:
+        """已有环境变量只覆盖对应连接字段，文件中的超时配置继续生效。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "llm.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "https://file.example.test",
+                        "api_key": "file-key",
+                        "model": "file-model",
+                        "timeout_seconds": 20,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            environment = {
+                "LLM_BASE_URL": "https://env.example.test",
+                "LLM_MODEL": "env-model",
+            }
+            with patch.dict("os.environ", environment, clear=True):
+                config = LlmConfig.from_json_file(path)
+
+        self.assertEqual(config.base_url, "https://env.example.test")
+        self.assertEqual(config.api_key, "file-key")
+        self.assertEqual(config.model, "env-model")
+        self.assertEqual(config.timeout_seconds, 20.0)
+
+    def test_invalid_json_config_is_rejected_without_exposing_values(self) -> None:
+        """未知字段、非法地址和超时必须在发起远程请求前被拒绝。"""
+
+        invalid_configs = (
+            {
+                "base_url": "https://llm.test",
+                "api_key": "secret",
+                "model": "m",
+                "extra": 1,
+            },
+            {"base_url": "file:///tmp/model", "api_key": "secret", "model": "m"},
+            {"base_url": "https://llm.test:bad", "api_key": "secret", "model": "m"},
+            {
+                "base_url": "https://llm.test",
+                "api_key": "secret",
+                "model": "m",
+                "timeout_seconds": True,
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, payload in enumerate(invalid_configs):
+                with self.subTest(index=index):
+                    path = Path(directory) / f"invalid-{index}.json"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with patch.dict("os.environ", {}, clear=True):
+                        with self.assertRaises(IntentError) as captured:
+                            LlmConfig.from_json_file(path)
+                    self.assertNotIn("secret", captured.exception.message)
+
+    def test_oversized_json_config_is_rejected(self) -> None:
+        """配置文件超过固定读取上限时必须 fail-fast。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized.json"
+            path.write_text("x" * (16 * 1024 + 1), encoding="utf-8")
+            with patch.dict("os.environ", {}, clear=True):
+                with self.assertRaisesRegex(IntentError, "16 KiB"):
+                    LlmConfig.from_json_file(path)
+
+    def test_duplicate_json_config_field_is_rejected(self) -> None:
+        """重复字段不能依赖 JSON 解析器的末值覆盖行为。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "duplicate.json"
+            path.write_text(
+                '{"base_url":"https://first.test","base_url":"https://second.test",'
+                '"api_key":"secret","model":"m"}',
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                with self.assertRaisesRegex(IntentError, "不是合法 JSON"):
+                    LlmConfig.from_json_file(path)
+
+    def test_cli_json_config_is_injected_into_text_extractor(self) -> None:
+        """启动参数中的文件配置必须注入服务，而不是只完成参数解析。"""
+
+        class FakeServer:
+            def __init__(self) -> None:
+                self.serve_called = False
+                self.close_called = False
+
+            def serve_forever(self) -> None:
+                self.serve_called = True
+
+            def server_close(self) -> None:
+                self.close_called = True
+
+        config = LlmConfig("https://llm.example.test", "key", "model")
+        server = FakeServer()
+        arguments = ["intent_sdn_demo", "--llm-config", "./llm.json", "--port", "9012"]
+        with (
+            patch("sys.argv", arguments),
+            patch(
+                "intent_sdn_demo.web_server.LlmConfig.from_json_file",
+                return_value=config,
+            ) as load_config,
+            patch("intent_sdn_demo.web_server.logging.basicConfig"),
+            patch("intent_sdn_demo.web_server.create_server", return_value=server) as create,
+        ):
+            web_server_main()
+
+        load_config.assert_called_once_with("./llm.json")
+        self.assertEqual(create.call_args.args, (9012,))
+        service = create.call_args.kwargs["service"]
+        self.assertIs(service._parser._extractor._config, config)
+        self.assertTrue(server.serve_called)
+        self.assertTrue(server.close_called)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from typing import ClassVar
 from urllib.parse import urlparse
 
 from intent_sdn_demo.errors import IntentError
+from intent_sdn_demo.extractor import LlmConfig, RemoteIntentExtractor
 from intent_sdn_demo.service import IntentSdnService
 
 
@@ -156,9 +157,24 @@ def main() -> None:
         action="store_true",
         help="启用临时 Mininet 策略验证；该模式需要 root 权限。",
     )
+    parser.add_argument(
+        "--llm-config",
+        metavar="JSON_FILE",
+        help="从本地 JSON 文件读取远程模型配置；已设置的环境变量优先覆盖文件值。",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    server = create_server(args.port, mininet_enabled=args.enable_mininet)
+    extractor = None
+    if args.llm_config:
+        try:
+            extractor = RemoteIntentExtractor(LlmConfig.from_json_file(args.llm_config))
+        except IntentError as exc:
+            parser.error(exc.message)
+    service = IntentSdnService(
+        extractor=extractor,
+        mininet_enabled=args.enable_mininet,
+    )
+    server = create_server(args.port, service=service)
     LOGGER.info("意图转译服务已启动：http://127.0.0.1:%s", args.port)
     try:
         server.serve_forever()
