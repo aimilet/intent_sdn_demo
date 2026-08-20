@@ -155,7 +155,7 @@ flowchart LR
 
 ### 5.1 大模型：仅负责语义抽取
 
-远程模型可通过启动参数 `--llm-config` 指向本地 UTF-8 JSON 文件，文件包含 `provider`、`base_url`、`api_key`、`model` 和可选的 `timeout_seconds`。`provider=openai` 使用 `/v1/chat/completions`、JSON mode 和 `choices[0].message.content`；`provider=ollama` 直接使用 `/api/chat`、非流式响应和 `message.content`，不依赖本地 Ollama。原有 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 环境变量继续支持，默认使用 OpenAI 协议，并在同时使用文件时按字段优先覆盖连接值。配置文件执行大小、字段、类型、HTTP(S) 地址和超时边界校验，远程响应限制为 1 MiB；推荐文件名 `llm-config.local.json` 已由仓库忽略。后端要求模型输出符合固定 JSON Schema 的 `IntentEnvelope`，并提供每个结构化字段对应的原文证据。OpenAI 请求使用 JSON mode；Ollama Cloud 当前不支持 structured outputs，因此只使用固定提示词并依靠同一套本地严格校验。请求温度固定为 0。
+远程模型可通过启动参数 `--llm-config` 指向本地 UTF-8 JSON 文件，文件包含 `provider`、`base_url`、`api_key`、`model` 和可选的 `timeout_seconds`。`provider=openai` 使用 `/v1/chat/completions`、JSON mode 和 `choices[0].message.content`；`provider=ollama` 直接使用 `/api/chat`、非流式响应和 `message.content`，不依赖本地 Ollama。Ollama 原生请求显式发送 `think:false`、温度 0 和 4096 token 生成上限，避免 thinking 模型默认长思考造成非流式请求长时间无首字节。原有 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 环境变量继续支持，默认使用 OpenAI 协议，并在同时使用文件时按字段优先覆盖连接值；混合来源会告警具体覆盖字段，请求日志只记录实际主机、端点、模型、超时和来源，不记录密钥。配置文件执行大小、字段、类型、HTTP(S) 地址和超时边界校验，权限过宽时告警，远程响应限制为 1 MiB；推荐文件名 `llm-config.local.json` 已由仓库忽略。后端要求模型输出符合固定 JSON Schema 的 `IntentEnvelope`，并提供每个结构化字段对应的原文证据。OpenAI 请求使用 JSON mode；Ollama Cloud 当前不支持 structured outputs，因此只使用固定提示词并依靠同一套本地严格校验。传输异常按请求打开/响应读取阶段和 timeout、DNS、connect、TLS、read 安全分类，其中 401/403 独立映射为凭据或模型权限失败。
 
 模型只能：
 

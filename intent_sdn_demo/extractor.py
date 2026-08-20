@@ -6,8 +6,11 @@ import json
 import logging
 import math
 import os
+import socket
+import ssl
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from http.client import IncompleteRead
 from pathlib import Path
 from typing import Protocol
 from urllib.error import HTTPError, URLError
@@ -22,6 +25,7 @@ from intent_sdn_demo.validation import reject_unknown_fields
 LOGGER = logging.getLogger(__name__)
 MAX_LLM_CONFIG_BYTES = 16 * 1024
 MAX_LLM_RESPONSE_BYTES = 1024 * 1024
+OLLAMA_NUM_PREDICT_LIMIT = 4096
 SUPPORTED_LLM_PROVIDERS = frozenset({"openai", "ollama"})
 
 
@@ -41,6 +45,8 @@ class LlmConfig:
     model: str
     provider: str = "openai"
     timeout_seconds: float = 30.0
+    # 配置来源仅由加载器内部标记，禁止调用方伪造内容写入日志。
+    config_source: str = field(default="direct", init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         """校验所有配置来源，防止非法地址、超长字段或非有限超时进入网络请求。"""
@@ -63,16 +69,16 @@ class LlmConfig:
             )
         if not _is_valid_base_url(base_url):
             raise IntentError("invalid_llm_config", "LLM base_url 必须是合法的 HTTP(S) 地址。", 503)
-        if not api_key or len(api_key) > 4096:
+        if not api_key or len(api_key) > 4096 or _contains_control_character(api_key):
             raise IntentError(
                 "invalid_llm_config",
-                "LLM api_key 必须是长度受限的非空字符串。",
+                "LLM api_key 必须是长度受限且不含控制字符的非空字符串。",
                 503,
             )
-        if not model or len(model) > 200:
+        if not model or len(model) > 200 or _contains_control_character(model):
             raise IntentError(
                 "invalid_llm_config",
-                "LLM model 必须是长度受限的非空字符串。",
+                "LLM model 必须是长度受限且不含控制字符的非空字符串。",
                 503,
             )
         if (
@@ -105,7 +111,9 @@ class LlmConfig:
                 "文字和语音意图解析未配置远程模型，请设置 LLM_BASE_URL、LLM_API_KEY 和 LLM_MODEL。",
                 503,
             )
-        return cls(base_url=base_url, api_key=api_key, model=model, provider="openai")
+        config = cls(base_url=base_url, api_key=api_key, model=model, provider="openai")
+        object.__setattr__(config, "config_source", "environment")
+        return config
 
     @classmethod
     def from_json_file(cls, file_path: str | os.PathLike[str]) -> "LlmConfig":
@@ -113,6 +121,7 @@ class LlmConfig:
 
         path = Path(file_path)
         try:
+            mode = path.stat().st_mode
             with path.open("rb") as config_file:
                 raw_bytes = config_file.read(MAX_LLM_CONFIG_BYTES + 1)
             if len(raw_bytes) > MAX_LLM_CONFIG_BYTES:
@@ -148,16 +157,42 @@ class LlmConfig:
                 f"LLM JSON 配置含不支持字段：{', '.join(unknown_fields)}。",
                 503,
             )
-        base_url = os.environ.get("LLM_BASE_URL", "").strip() or data.get("base_url")
-        api_key = os.environ.get("LLM_API_KEY", "").strip() or data.get("api_key")
-        model = os.environ.get("LLM_MODEL", "").strip() or data.get("model")
-        return cls(
+        env_base_url = os.environ.get("LLM_BASE_URL", "").strip()
+        env_api_key = os.environ.get("LLM_API_KEY", "").strip()
+        env_model = os.environ.get("LLM_MODEL", "").strip()
+        base_url = env_base_url or data.get("base_url")
+        api_key = env_api_key or data.get("api_key")
+        model = env_model or data.get("model")
+        config = cls(
             base_url=base_url,
             api_key=api_key,
             model=model,
             provider=data.get("provider", "openai"),
             timeout_seconds=data.get("timeout_seconds", 30.0),
         )
+        overridden = tuple(
+            name
+            for name, value in (
+                ("base_url", env_base_url),
+                ("api_key", env_api_key),
+                ("model", env_model),
+            )
+            if value
+        )
+        source = "json" if not overridden else f"json+env:{','.join(overridden)}"
+        object.__setattr__(config, "config_source", source)
+        if os.name == "posix" and mode & 0o077:
+            # WSL 的 drvfs 可能不支持 chmod，因此只告警并建议迁移，不伪装权限已收紧。
+            LOGGER.warning(
+                "LLM JSON 配置文件的组/其他用户权限过宽；"
+                "请移至支持 POSIX 权限的目录并设置为 600。"
+            )
+        if overridden:
+            LOGGER.warning(
+                "LLM JSON 配置被环境变量覆盖：字段=%s；实际请求使用覆盖后的值。",
+                ",".join(overridden),
+            )
+        return config
 
     @property
     def endpoint(self) -> str:
@@ -201,7 +236,8 @@ def _is_valid_base_url(value: str) -> bool:
         parsed.scheme in {"http", "https"}
         and parsed.netloc
         and hostname
-        and not any(character.isspace() for character in hostname)
+        and not any(character.isspace() for character in value)
+        and not _contains_control_character(value)
         and parsed.username is None
         and parsed.password is None
         and not parsed.query
@@ -209,11 +245,19 @@ def _is_valid_base_url(value: str) -> bool:
     )
 
 
+def _contains_control_character(value: str) -> bool:
+    """拒绝换行等 ASCII 控制字符，防止 HTTP 头和日志注入。"""
+
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
 class RemoteIntentExtractor:
     """使用 OpenAI 兼容或 Ollama 原生接口抽取 JSON，并交给本地规则校验。"""
 
     def __init__(self, config: LlmConfig | None = None) -> None:
         self._config = config
+        if config is not None:
+            _log_config(config)
 
     def extract(self, text: str, actor_role: ActorRole) -> Mapping[str, object]:
         """调用远程模型并只接受包含 intents 的合法 JSON 对象。"""
@@ -230,6 +274,8 @@ class RemoteIntentExtractor:
             },
             method="POST",
         )
+        if self._config is None:
+            _log_config(config)
         LOGGER.info(
             "提交远程意图抽取请求：提供方=%s，角色=%s，文本长度=%s",
             config.provider,
@@ -237,15 +283,7 @@ class RemoteIntentExtractor:
             len(text),
         )
         try:
-            with urlopen(request, timeout=config.timeout_seconds) as response:
-                raw_bytes = response.read(MAX_LLM_RESPONSE_BYTES + 1)
-                if len(raw_bytes) > MAX_LLM_RESPONSE_BYTES:
-                    raise IntentError(
-                        "invalid_llm_output",
-                        "远程模型响应超过 1 MiB 限制。",
-                        422,
-                    )
-                raw_response = raw_bytes.decode("utf-8")
+            response = urlopen(request, timeout=config.timeout_seconds)
         except HTTPError as exc:
             LOGGER.warning(
                 "远程意图抽取服务返回 HTTP 状态：提供方=%s，状态=%s",
@@ -271,12 +309,27 @@ class RemoteIntentExtractor:
                     503,
                 ) from exc
             raise IntentError("llm_request_failed", "远程意图抽取服务拒绝了请求。", 503) from exc
+        except (TimeoutError, URLError, OSError) as exc:
+            # urlopen 同时覆盖建连和等待响应头，不伪造更细的阶段判断。
+            _raise_transport_error(config, exc, "open")
+
+        try:
+            with response:
+                raw_bytes = response.read(MAX_LLM_RESPONSE_BYTES + 1)
+                if len(raw_bytes) > MAX_LLM_RESPONSE_BYTES:
+                    raise IntentError(
+                        "invalid_llm_output",
+                        "远程模型响应超过 1 MiB 限制。",
+                        422,
+                    )
+                raw_response = raw_bytes.decode("utf-8")
+        except IntentError:
+            raise
         except UnicodeDecodeError as exc:
             LOGGER.warning("远程意图抽取服务返回了非 UTF-8 响应。")
             raise IntentError("invalid_llm_output", "远程模型未返回合法的意图 JSON。", 422) from exc
-        except (TimeoutError, URLError, OSError) as exc:
-            LOGGER.warning("远程意图抽取服务不可用：%s", type(exc).__name__)
-            raise IntentError("llm_unavailable", "远程意图抽取服务暂时不可用。", 503) from exc
+        except (IncompleteRead, TimeoutError, URLError, OSError) as exc:
+            _raise_transport_error(config, exc, "read")
 
         try:
             response_data = json.loads(raw_response)
@@ -316,7 +369,9 @@ def _request_body(
             "model": config.model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0},
+            # Cloud thinking 模型默认可能长时间思考；关闭思考并限制输出避免代理读超时。
+            "think": False,
+            "options": {"temperature": 0, "num_predict": OLLAMA_NUM_PREDICT_LIMIT},
         }
     return {
         "model": config.model,
@@ -338,6 +393,59 @@ def _response_content(config: LlmConfig, response_data: object) -> str:
     if not isinstance(content, str) or not content:
         raise ValueError("远程响应 content 必须是非空字符串。")
     return content
+
+
+def _log_config(config: LlmConfig) -> None:
+    """记录不含密钥的连接摘要，帮助区分 JSON 与环境变量实际生效配置。"""
+
+    LOGGER.info(
+        "远程模型配置：提供方=%s，主机=%s，端点=%s，模型=%s，超时=%ss，来源=%s",
+        config.provider,
+        _endpoint_host(config.endpoint),
+        urlparse(config.endpoint).path,
+        config.model,
+        config.timeout_seconds,
+        config.config_source,
+    )
+
+
+def _endpoint_host(endpoint: str) -> str:
+    """提取已校验端点的主机名，日志不记录完整 URL 或认证信息。"""
+
+    return urlparse(endpoint).hostname or "unknown"
+
+
+def _raise_transport_error(config: LlmConfig, error: BaseException, phase: str) -> None:
+    """按网络阶段和 URLError.reason 分类记录，并转换为安全的领域错误。"""
+
+    kind = _classify_transport_error(error, phase)
+    LOGGER.warning(
+        "远程意图抽取网络失败：提供方=%s，主机=%s，阶段=%s，类型=%s",
+        config.provider,
+        _endpoint_host(config.endpoint),
+        phase,
+        kind,
+    )
+    if kind == "timeout":
+        raise IntentError("llm_timeout", "远程模型请求超时，请稍后重试。", 503) from error
+    raise IntentError("llm_unavailable", "远程意图抽取服务暂时不可用。", 503) from error
+
+
+def _classify_transport_error(error: BaseException, phase: str) -> str:
+    """仅依据异常类型安全区分 timeout、DNS、connect、TLS 和 read。"""
+
+    reason = error.reason if isinstance(error, URLError) else error
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return "timeout"
+    if isinstance(reason, socket.gaierror):
+        return "dns"
+    if isinstance(reason, ssl.SSLError):
+        return "tls"
+    if phase == "read":
+        return "read"
+    if isinstance(reason, (ConnectionError, OSError)):
+        return "connect"
+    return "network"
 
 
 def _system_prompt() -> str:

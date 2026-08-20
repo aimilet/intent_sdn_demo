@@ -12,7 +12,9 @@
 - 不可替换的确定性安全评价会约束可替换评价器和选择器，伪造可行性、硬目标状态或候选计划不能进入预览缓存。
 - 任意新编译请求都会清除旧预览和旧实测缓存，阻断结果不能确认历史计划。
 - `--llm-config` 可加载本地 JSON 模型配置；重复/未知字段、超大或非 UTF-8 文件、非法 HTTP(S) 地址和越界超时均在网络请求前拒绝，环境变量可按字段安全覆盖文件值。
-- `provider=openai` 与 `provider=ollama` 分别生成 Chat Completions 和 Ollama `/api/chat` 请求，并按各自响应结构取回内容；Ollama 分支关闭流式响应且不伪装 structured outputs，401/403、404、429 和超大响应均受控处理。
+- `provider=openai` 与 `provider=ollama` 分别生成 Chat Completions 和 Ollama `/api/chat` 请求，并按各自响应结构取回内容；Ollama 分支关闭流式响应、显式关闭 thinking、限制 4096 token 输出且不伪装 structured outputs。
+- JSON 与环境变量混合时告警实际覆盖字段；日志只记录 provider、主机、端点、模型、超时和来源。权限过宽的密钥文件会告警，日志不含密钥和底层异常正文。
+- 401/403、404、429、超大响应、不完整读取以及 timeout、DNS、connect、TLS、read 网络异常均受控处理。
 
 独立功能 Review 共执行三轮，覆盖入口校验、Grounding 数据流、候选与执行边界、并发状态、异常路径、界面输出、测试和文档。Review 发现的编译/执行状态交错、评价器修改候选或伪造安全状态、选择器返回未验证结果、旧版 `Intent` 往返、非 UTF-8 模型响应、证据来源校验以及 `compile` 双入口歧义均已修复并补充回归测试；最终复审无功能或安全阻断项。
 
@@ -21,11 +23,15 @@
 | 验证项 | 结果 |
 |---|---|
 | `python3 -m compileall -q intent_sdn_demo tests` | 通过 |
-| `python3 -m unittest discover -s tests -v` | 共运行 60 项：59 项通过，1 项因当前沙箱禁止监听本地端口而跳过 |
+| `python3 -m unittest discover -s tests -v` | 共运行 63 项：62 项通过，1 项因当前沙箱禁止监听本地端口而跳过 |
 | `node --check intent_sdn_demo/web/app.js` | 通过 |
 | `git diff --check` | 通过 |
 
-本次尝试使用本地忽略配置中的 API Key 对 Ollama Cloud 发起最小真实抽取，但沙箱内 DNS 被禁止，提升权限又因外发数据与密钥风险被安全审查拒绝，因此没有实际请求发送。双协议请求体、响应解析和错误路径已由不访问网络的自动化测试覆盖；真实 Cloud 端到端仍需在用户本机重启服务后验证。
+网络分层实测中，公开 `GET https://ollama.com/api/tags` 返回 200，连接、TLS 和总耗时分别约为 0.02、0.54 和 0.87 秒，且模型列表包含 `deepseek-v4-flash:0731`。经用户明确授权后，使用当前本地 JSON 的 API Key 向同模型发送了一次最小 `POST /api/chat`，请求设置 `stream:false`、`think:false` 和 32 token 上限，不输出密钥或响应正文；上游在约 1.94 秒返回 403。该结果证明公开网络可达但当前凭据或模型权限被拒绝，因此真实文字意图端到端验收仍被外部凭据阻塞。
+
+此前 Demo 在约 132.6 秒后记录 `URLError`，而当前文件凭据直连为快速 403，两者不是同一失败形态。`--llm-config` 文件仅在服务启动时加载，且非空 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 会按字段覆盖 JSON；因此更新凭据后必须清理非预期环境变量并重启服务，再以新日志中的实际配置摘要为准。
+
+本次 Cloud 故障修复由独立 review agent 完成三轮复核，先后发现并闭环了 512 token 可能截断多意图、混合配置来源不可观测、密钥文件权限过宽、`IncompleteRead` 未受控以及模型名日志注入等问题。最终复审未发现新的代码级提交阻断项；唯一剩余阻塞是当前 Cloud 凭据或模型权限返回 403。
 
 本次未在当前沙箱重新执行 root Mininet/OVS 集成。执行器、固定 OpenFlow/OVS 动作和既有真实验收场景未被修改；下列 2026-08-14 记录仍用于证明该执行链的既有实测结果。第二版新增的 Grounding 和候选评价链已经由不依赖模型密钥、Mininet 和 root 权限的自动化测试覆盖。
 

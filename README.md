@@ -46,7 +46,7 @@ python3 -m intent_sdn_demo --port 8765
 }
 ```
 
-`provider=ollama` 会固定调用 `POST /api/chat`、关闭流式响应并读取 `message.content`，不会再拼接 `/v1/chat/completions`。Cloud API 使用的模型名应以 Ollama 官方 [`/api/tags`](https://ollama.com/api/tags) 返回值为准，不能沿用本地代理的 `:cloud` 别名。Ollama Cloud 当前不支持 structured outputs，因此该分支不发送 `format`；模型输出仍必须通过本项目的 JSON 解析、未知字段、证据和完整 Intent Schema 校验，否则明确拒绝。
+`provider=ollama` 会固定调用 `POST /api/chat`、关闭流式响应并读取 `message.content`，不会再拼接 `/v1/chat/completions`。Cloud API 使用的模型名应以 Ollama 官方 [`/api/tags`](https://ollama.com/api/tags) 返回值为准，不能沿用本地代理的 `:cloud` 别名。Ollama 分支按官方 [Thinking API](https://docs.ollama.com/capabilities/thinking) 发送 `think: false`，并将最大生成量限制为 4096 token，避免短意图在非流式模式下长时间无首字节。Ollama Cloud 当前不支持 structured outputs，因此该分支不发送 `format`；模型输出仍必须通过本项目的 JSON 解析、未知字段、证据和完整 Intent Schema 校验，否则明确拒绝。
 
 然后显式指定该文件启动：
 
@@ -54,9 +54,9 @@ python3 -m intent_sdn_demo --port 8765
 python3 -m intent_sdn_demo --llm-config ./llm-config.local.json --port 8765
 ```
 
-配置文件必须是 UTF-8 JSON 对象，只允许上述五个字段，`provider` 只接受 `openai` 或 `ollama`，文件大小不能超过 16 KiB；`base_url` 只接受不含账号、查询参数和片段的 HTTP(S) 地址，超时范围为 `(0, 300]` 秒。远程响应最大读取 1 MiB，API Key 不会写入日志或接口响应。Linux/macOS 上还应执行 `chmod 600 llm-config.local.json`；也可以把配置放在仓库外并传入绝对路径。
+配置文件必须是 UTF-8 JSON 对象，只允许上述五个字段，`provider` 只接受 `openai` 或 `ollama`，文件大小不能超过 16 KiB；`base_url` 只接受不含账号、查询参数和片段的 HTTP(S) 地址，超时范围为 `(0, 300]` 秒。远程响应最大读取 1 MiB，API Key 不会写入日志或接口响应。Linux/macOS 上还应执行 `chmod 600 llm-config.local.json`；启动时发现组/其他用户仍可读会明确告警。WSL 的 `/mnt/c`、`/mnt/d` 等 drvfs 挂载可能忽略 `chmod`，此时应将配置移到例如 `/home/用户名/.config/intent-sdn/llm.json` 的 Linux 文件系统目录，再向 `--llm-config` 传入绝对路径。
 
-原有环境变量方式继续支持并默认使用 `openai` 协议；当同时使用 JSON 文件和环境变量时，非空的三个环境变量会分别覆盖文件中的连接字段，`provider` 和 `timeout_seconds` 仍取文件值：
+原有环境变量方式继续支持并默认使用 `openai` 协议；当同时使用 JSON 文件和环境变量时，非空的三个环境变量会分别覆盖文件中的连接字段，`provider` 和 `timeout_seconds` 仍取文件值。启动时会告警被覆盖的字段名，并记录不含密钥的实际 provider、主机、端点、模型和超时。不需要覆盖时应先 `unset LLM_BASE_URL LLM_API_KEY LLM_MODEL`：
 
 ```bash
 export LLM_BASE_URL='https://模型服务地址'

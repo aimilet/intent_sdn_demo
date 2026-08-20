@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import math
+import socket
+import ssl
 import tempfile
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
+from http.client import IncompleteRead
 from pathlib import Path
 from threading import Event, Thread
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from intent_sdn_demo.errors import IntentError
 from intent_sdn_demo.extractor import LlmConfig, RemoteIntentExtractor
@@ -617,11 +620,13 @@ class LlmConfigFileTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            path.chmod(0o600)
             with patch.dict("os.environ", {}, clear=True):
                 config = LlmConfig.from_json_file(path)
 
         self.assertEqual(config.endpoint, "https://llm.example.test/v1/chat/completions")
         self.assertEqual(config.provider, "openai")
+        self.assertEqual(config.config_source, "json")
         self.assertEqual(config.api_key, "file-key")
         self.assertEqual(config.model, "file-model")
         self.assertEqual(config.timeout_seconds, 12.5)
@@ -643,19 +648,61 @@ class LlmConfigFileTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            path.chmod(0o600)
             environment = {
                 "LLM_BASE_URL": "https://env.example.test",
                 "LLM_MODEL": "env-model",
             }
             with patch.dict("os.environ", environment, clear=True):
-                config = LlmConfig.from_json_file(path)
+                with self.assertLogs("intent_sdn_demo.extractor", level="WARNING") as logs:
+                    config = LlmConfig.from_json_file(path)
 
         self.assertEqual(config.base_url, "https://env.example.test")
         self.assertEqual(config.provider, "ollama")
         self.assertEqual(config.endpoint, "https://env.example.test/api/chat")
+        self.assertEqual(config.config_source, "json+env:base_url,model")
         self.assertEqual(config.api_key, "file-key")
         self.assertEqual(config.model, "env-model")
         self.assertEqual(config.timeout_seconds, 20.0)
+        log_text = "\n".join(logs.output)
+        self.assertIn("字段=base_url,model", log_text)
+        self.assertNotIn("file-key", log_text)
+
+    def test_wide_config_permissions_emit_safe_warning(self) -> None:
+        """POSIX 上权限过宽的密钥文件必须告警，但不回显密钥。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "llm.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "https://ollama.com",
+                        "api_key": "secret-key",
+                        "model": "model",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            path.chmod(0o644)
+            with patch.dict("os.environ", {}, clear=True):
+                with self.assertLogs("intent_sdn_demo.extractor", level="WARNING") as logs:
+                    LlmConfig.from_json_file(path)
+
+        log_text = "\n".join(logs.output)
+        self.assertIn("权限过宽", log_text)
+        self.assertNotIn("secret-key", log_text)
+
+    def test_config_source_cannot_be_injected_by_caller(self) -> None:
+        """配置来源是内部日志元数据，调用方不得伪造日志文本。"""
+
+        with self.assertRaises(TypeError):
+            LlmConfig(
+                "https://ollama.com",
+                "key",
+                "model",
+                provider="ollama",
+                config_source="forged\nWARNING injected",  # type: ignore[call-arg]
+            )
 
     def test_invalid_json_config_is_rejected_without_exposing_values(self) -> None:
         """未知字段、非法地址和超时必须在发起远程请求前被拒绝。"""
@@ -680,6 +727,16 @@ class LlmConfigFileTest(unittest.TestCase):
                 "api_key": "secret",
                 "model": "m",
                 "timeout_seconds": True,
+            },
+            {
+                "base_url": "https://llm.test",
+                "api_key": "secret",
+                "model": "model\nforged-log",
+            },
+            {
+                "base_url": "https://llm.test",
+                "api_key": "secret\r\nforged-header",
+                "model": "m",
             },
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -800,7 +857,8 @@ class LlmConfigFileTest(unittest.TestCase):
         self.assertEqual(captured["timeout"], 60.0)
         body = captured["body"]
         self.assertFalse(body["stream"])
-        self.assertEqual(body["options"], {"temperature": 0})
+        self.assertFalse(body["think"])
+        self.assertEqual(body["options"], {"temperature": 0, "num_predict": 4096})
         self.assertNotIn("response_format", body)
         self.assertNotIn("format", body)
 
@@ -852,6 +910,64 @@ class LlmConfigFileTest(unittest.TestCase):
         self.assertEqual(captured.exception.code, "llm_auth_failed")
         self.assertNotIn("secret-cloud-key", captured.exception.message)
         self.assertIn("API Key", captured.exception.message)
+
+    def test_transport_reason_is_classified_without_secret_logging(self) -> None:
+        """URLError.reason 只映射为安全类别，日志不得包含密钥或底层正文。"""
+
+        config = LlmConfig(
+            "https://ollama.com",
+            "secret-cloud-key",
+            "deepseek-v4-flash:0731",
+            provider="ollama",
+        )
+        connect_cases = (
+            ("timeout", URLError(TimeoutError("secret timeout"))),
+            ("dns", URLError(socket.gaierror(-2, "secret dns"))),
+            ("connect", URLError(ConnectionRefusedError(111, "secret connect"))),
+            ("tls", URLError(ssl.SSLError("secret tls"))),
+        )
+        for kind, error in connect_cases:
+            with self.subTest(kind=kind):
+                with patch("intent_sdn_demo.extractor.urlopen", side_effect=error):
+                    with self.assertLogs("intent_sdn_demo.extractor", level="INFO") as logs:
+                        with self.assertRaises(IntentError) as captured:
+                            RemoteIntentExtractor(config).extract("紧急消息", ActorRole.DISPATCHER)
+                expected_code = "llm_timeout" if kind == "timeout" else "llm_unavailable"
+                self.assertEqual(captured.exception.code, expected_code)
+                log_text = "\n".join(logs.output)
+                self.assertIn(f"类型={kind}", log_text)
+                self.assertNotIn("secret-cloud-key", log_text)
+
+        class ReadFailureResponse:
+            def __init__(self, error: BaseException) -> None:
+                self._error = error
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> bool:
+                return False
+
+            def read(self, _size: int = -1) -> bytes:
+                raise self._error
+
+        for error in (
+            URLError(ConnectionResetError(104, "secret read")),
+            IncompleteRead(b"partial secret", 20),
+        ):
+            with self.subTest(read_error=type(error).__name__):
+                response = ReadFailureResponse(error)
+                with patch("intent_sdn_demo.extractor.urlopen", return_value=response):
+                    with self.assertLogs("intent_sdn_demo.extractor", level="INFO") as logs:
+                        with self.assertRaises(IntentError) as captured:
+                            RemoteIntentExtractor(config).extract("紧急消息", ActorRole.DISPATCHER)
+                log_text = "\n".join(logs.output)
+                self.assertEqual(captured.exception.code, "llm_unavailable")
+                self.assertIn("阶段=read", log_text)
+                self.assertIn("类型=read", log_text)
+                self.assertNotIn("secret-cloud-key", log_text)
+                self.assertNotIn("partial secret", log_text)
+                self.assertIn("端点=/api/chat", log_text)
 
     def test_oversized_remote_response_is_rejected(self) -> None:
         """远程响应超过固定上限时不得继续解码和反序列化。"""
