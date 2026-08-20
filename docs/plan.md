@@ -319,7 +319,85 @@ OVS QoS 使用出口整形与队列，队列配置后必须由 OpenFlow `set_que
 
 ## 11. 后续扩展方向
 
-第二版稳定后，可按以下顺序扩展：
+### 11.1 受控服务知识检索与候选约束解析
+
+下一版优先把当前提示词中固定列举的服务类型、流量类型和目标枚举迁移到版本化服务知识目录，形成“检索相关知识，再在候选范围内解析”的结构化 RAG 流水线。该改造的目的不是让 Agent 决定网络动作，而是降低提示词随服务数量增长而膨胀的问题，并使服务识别结果能够追溯到具体知识条目和版本。
+
+目标调用链如下：
+
+```text
+用户原文
+  → 受控服务知识检索 Agent
+  → 只读知识工具查询
+  → Top-K 候选知识包
+  → 候选约束的 Intent 抽取
+  → 本地 Schema 与实体二次校验
+  → 按知识标识重新读取权威 SLA
+  → 现有仲裁、候选生成、策略确认与 Mininet 验证
+```
+
+首版知识目录使用 Python 标准库 `sqlite3` 实现，不立即引入图数据库或向量数据库。当前业务规模较小，关系表、别名索引和全文检索已经足够；同时定义与存储实现无关的 `ServiceKnowledgeRepository` 接口，为服务、车辆、区域、网络切片和能力关系增长后切换知识图谱保留边界。运行期拓扑状态继续由 `TopologyInventory` 管理，不与版本化业务知识混为同一数据源。
+
+知识目录至少包含以下实体：
+
+| 实体 | 主要字段或关系 | 作用 |
+|---|---|---|
+| `Service` | `service_id`、名称、说明、状态、知识版本 | 服务的稳定标识，替代提示词中的完整服务枚举 |
+| `TrafficClass` | `traffic_class_id`、名称、说明 | 描述网络流量类别及其边界 |
+| `ServiceAlias` | 别名、规范化词、关联服务 | 支持“救护车消息”“急救通信”等自然语言检索 |
+| `Objective` | 目标标识、说明、适用范围 | 限定服务允许选择的网络目标 |
+| `SlaProfile` | 条目标识、版本、约束、偏好顺序、来源 | 供 Grounding 阶段权威读取，不作为用户显式约束 |
+| `Capability` | 服务与目标、流量类别、策略能力的关系 | 为候选过滤提供结构化依据 |
+| `KnowledgeSource` | 来源、版本、生效时间、说明 | 提供知识更新和审计证据 |
+
+检索 Agent 只允许调用以下参数化只读工具，不允许生成或执行任意 SQL、Cypher、Shell、OpenFlow 或数据写入操作：
+
+```text
+search_services(query, top_k)
+get_service(service_id)
+get_sla_profile(profile_id)
+get_supported_objectives(service_id)
+get_related_services(service_id)
+```
+
+`search_services` 首先使用规范化别名和精确匹配，再使用 SQLite 全文检索补充召回；语义向量检索只在真实数据证明关键词召回不足后评估。单次检索的 `top_k` 和 Agent 调用轮数必须有固定上限。结果分数只用于候选排序，不能作为身份、权限、SLA 或策略可行性的权威证明。低匹配度或多个候选接近时，返回 `ambiguities` 并阻断自动下发，不让模型猜测服务类型。
+
+Agent 返回的候选知识包采用受限结构：
+
+```json
+{
+  "query": "救护车消息必须低时延",
+  "candidates": [
+    {
+      "service_id": "emergency_v2x",
+      "traffic_class": "emergency",
+      "matched_aliases": ["救护车消息"],
+      "supported_objectives": ["minimize_latency", "prioritize_traffic"],
+      "sla_profile_id": "sla:emergency_v2x",
+      "knowledge_version": "1",
+      "retrieval_score": 0.94
+    }
+  ],
+  "ambiguities": []
+}
+```
+
+后续 Intent 抽取模型只能选择知识包中出现的 `service_id`、`traffic_class` 和 `supported_objectives`，仍需返回用户原文证据。检索到的 SLA 数值不得写入代表用户显式表达的 `constraints`；编译阶段必须使用模型选中的知识标识重新查询只读目录，并生成独立的 `GroundingRecord`。客户端和模型返回的 SLA 内容、检索分数或知识版本都不能替代服务端权威读取。
+
+与当前模块的预期衔接为：
+
+- `extractor.py` 的固定提示词改为通用抽取规则和本次 Top-K 候选，不再列举完整服务目录。
+- 新增知识仓储与检索层；Agent 仅负责组合安全工具调用和生成候选知识包。
+- `validation.py` 根据当前知识目录校验服务、流量类型和目标关系，并校验所选标识确实来自本次候选集合。
+- `grounding.py` 通过仓储接口按标识和版本读取 SLA，继续负责显式约束与派生约束冲突检查。
+- `arbitration.py`、`policy.py` 和 `execution.py` 保持确定性安全边界；知识检索不能创建白名单外计划或改变命令参数。
+- 页面新增“检索证据”展示，至少包含查询词、匹配别名、候选服务、知识版本、最终选择和歧义原因，但不显示数据库连接信息。
+
+实施顺序为：先建立 SQLite Schema、种子数据、版本迁移和只读仓储接口；再实现有界的别名/全文混合检索；随后接入受控检索 Agent 和候选约束抽取；最后补充检索证据页面、提示注入测试、候选越权测试、知识版本回放测试和现有解析回归。第一阶段必须保证当前四种服务的相同输入仍能生成语义等价的 Intent，且 JSON 输入和 Mininet 执行链不受影响。
+
+### 11.2 其他扩展顺序
+
+完成上述知识检索演进后，可按以下顺序扩展：
 
 1. 参数化拓扑、流量和候选配置，采集 `(NetworkSnapshot, CandidatePlan, Metrics)` 数据集，并按未见拓扑划分训练/验证/测试集。
 2. 在已有评价接口后接入 RouteNet/PLAN-Net 风格 GNN，以影子模式比较预测与 Mininet 实测；满足误差、校准和硬约束误放行标准后才允许参与排序。
