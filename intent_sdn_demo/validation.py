@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from uuid import uuid4
 
@@ -15,6 +16,11 @@ from intent_sdn_demo.models import (
     IntentEnvelope,
     Objective,
     Priority,
+    SemanticLevel,
+    SemanticMetric,
+    SemanticOrigin,
+    SemanticRequirement,
+    ServiceType,
     Scope,
     SourceChannel,
     Strength,
@@ -29,6 +35,59 @@ MAX_VEHICLES_PER_SCOPE = 8
 MAX_CONSTRAINTS = 3
 MAX_EVIDENCE_LENGTH = 240
 MAX_AMBIGUITY_LENGTH = 240
+MAX_SEMANTIC_REQUIREMENTS = 6
+MAX_SEMANTIC_EVIDENCE_LENGTH = 240
+
+
+SERVICE_BY_TRAFFIC_CLASS = {
+    TrafficClass.EMERGENCY: ServiceType.EMERGENCY_V2X,
+    TrafficClass.CONTROL: ServiceType.VEHICLE_CONTROL,
+    TrafficClass.NAVIGATION: ServiceType.NAVIGATION,
+    TrafficClass.VIDEO: ServiceType.BACKGROUND_VIDEO,
+}
+
+
+_ENVELOPE_FIELDS = frozenset(
+    {"request_id", "source_channel", "actor_role", "original_text", "intents"}
+)
+_INTENT_FIELDS = frozenset(
+    {
+        "scope",
+        "objective",
+        "service",
+        "strength",
+        "priority",
+        "constraints",
+        "semantic_requirements",
+        "evidence",
+        "ambiguities",
+    }
+)
+_SCOPE_FIELDS = frozenset({"vehicle_ids", "traffic_class"})
+_CONSTRAINT_FIELDS = frozenset({"metric", "operator", "value", "unit"})
+_SEMANTIC_REQUIREMENT_FIELDS = frozenset({"metric", "level", "origin", "evidence"})
+
+_OBJECTIVES_BY_TRAFFIC_CLASS = {
+    TrafficClass.EMERGENCY: frozenset(
+        {Objective.PRIORITIZE_TRAFFIC, Objective.MINIMIZE_LATENCY}
+    ),
+    TrafficClass.CONTROL: frozenset(
+        {Objective.PRIORITIZE_TRAFFIC, Objective.MINIMIZE_LATENCY}
+    ),
+    TrafficClass.NAVIGATION: frozenset(
+        {Objective.PRIORITIZE_TRAFFIC, Objective.MINIMIZE_LATENCY}
+    ),
+    TrafficClass.VIDEO: frozenset(
+        {
+            Objective.PRIORITIZE_TRAFFIC,
+            Objective.RELIEVE_NETWORK_CONGESTION,
+            Objective.LIMIT_BACKGROUND_TRAFFIC,
+        }
+    ),
+    TrafficClass.ALL: frozenset(
+        {Objective.RELIEVE_NETWORK_CONGESTION, Objective.LIMIT_BACKGROUND_TRAFFIC}
+    ),
+}
 
 
 def parse_source_channel(value: object) -> SourceChannel:
@@ -65,7 +124,15 @@ def build_envelope(
     if len(intents_payload) > MAX_INTENTS:
         raise IntentError("too_many_intents", f"单次请求最多包含 {MAX_INTENTS} 条意图。")
 
-    intents = tuple(_parse_intent(item, topology) for item in intents_payload)
+    intents = tuple(
+        _parse_intent(
+            item,
+            topology,
+            source_channel=source_channel,
+            original_text=original_text,
+        )
+        for item in intents_payload
+    )
     return IntentEnvelope(
         request_id=request_id or f"req-{uuid4().hex[:12]}",
         source_channel=source_channel,
@@ -79,6 +146,7 @@ def envelope_from_dict(payload: object, topology: TopologyInventory) -> IntentEn
     """校验 API 传回的完整 IR，用于编译接口的二次边界保护。"""
 
     data = _expect_mapping(payload, "envelope")
+    _reject_unknown_fields(data, _ENVELOPE_FIELDS, "envelope")
     request_id = _required_string(data, "request_id", 64)
     source_channel = parse_source_channel(data.get("source_channel"))
     actor_role = parse_actor_role(data.get("actor_role"))
@@ -93,31 +161,127 @@ def envelope_from_dict(payload: object, topology: TopologyInventory) -> IntentEn
     )
 
 
-def _parse_intent(payload: object, topology: TopologyInventory) -> Intent:
+def _parse_intent(
+    payload: object,
+    topology: TopologyInventory,
+    *,
+    source_channel: SourceChannel,
+    original_text: str,
+) -> Intent:
     """校验单条意图的结构、枚举、实体、数值和证据。"""
 
     data = _expect_mapping(payload, "intent")
+    _reject_unknown_fields(data, _INTENT_FIELDS, "intent")
     scope_data = _expect_mapping(data.get("scope"), "scope")
+    _reject_unknown_fields(scope_data, _SCOPE_FIELDS, "scope")
     vehicle_ids = _parse_vehicle_ids(scope_data.get("vehicle_ids"), topology)
     traffic_class = _parse_enum(TrafficClass, scope_data.get("traffic_class"), "traffic_class")
     if traffic_class is TrafficClass.ALL and vehicle_ids:
         raise IntentError("invalid_scope", "traffic_class 为 all 时不能指定车辆编号。")
 
+    service = _parse_service(data, traffic_class)
+    objective = _parse_enum(Objective, data.get("objective"), "objective")
+    allowed_objectives = _OBJECTIVES_BY_TRAFFIC_CLASS[traffic_class]
+    if objective not in allowed_objectives:
+        allowed = ", ".join(item.value for item in sorted(allowed_objectives, key=lambda item: item.value))
+        raise IntentError(
+            "objective_scope_mismatch",
+            f"traffic_class {traffic_class.value!r} 不支持 objective {objective.value!r}，允许值：{allowed}。",
+        )
     constraints = _parse_constraints(data.get("constraints", []))
     _validate_constraint_set(constraints)
     evidence = _parse_string_list(data.get("evidence"), "evidence", MAX_EVIDENCE_LENGTH, required=True)
+    _validate_text_evidence(evidence, source_channel, original_text)
+    semantic_requirements = _parse_semantic_requirements(
+        data.get("semantic_requirements", [])
+    )
+    _validate_semantic_evidence(semantic_requirements, evidence)
     ambiguities = _parse_string_list(
         data.get("ambiguities", []), "ambiguities", MAX_AMBIGUITY_LENGTH, required=False
     )
     return Intent(
         scope=Scope(vehicle_ids=vehicle_ids, traffic_class=traffic_class),
-        objective=_parse_enum(Objective, data.get("objective"), "objective"),
+        objective=objective,
         strength=_parse_enum(Strength, data.get("strength"), "strength"),
         priority=_parse_enum(Priority, data.get("priority"), "priority"),
         constraints=constraints,
         evidence=evidence,
         ambiguities=ambiguities,
+        service=service,
+        semantic_requirements=semantic_requirements,
     )
+
+
+def _validate_text_evidence(
+    evidence: tuple[str, ...], source_channel: SourceChannel, original_text: str
+) -> None:
+    """文字和语音证据必须是原文片段，禁止模型凭空编造依据。"""
+
+    if source_channel not in {SourceChannel.TEXT, SourceChannel.VOICE}:
+        return
+    for item in evidence:
+        if item not in original_text:
+            raise IntentError(
+                "evidence_not_in_text",
+                "文字或语音意图的 evidence 必须是 original_text 的原文片段。",
+            )
+
+
+def _validate_semantic_evidence(
+    requirements: tuple[SemanticRequirement, ...], evidence: tuple[str, ...]
+) -> None:
+    """语义要求证据必须复用同一意图的 evidence，避免出现两套来源。"""
+
+    allowed = set(evidence)
+    for requirement in requirements:
+        if requirement.evidence not in allowed:
+            raise IntentError(
+                "semantic_evidence_mismatch",
+                "semantic_requirements.evidence 必须与 intent evidence 一致。",
+            )
+
+
+def _parse_service(data: Mapping[str, object], traffic_class: TrafficClass) -> ServiceType:
+    """按业务类别补齐缺省服务，并拒绝客户端伪造跨业务服务。"""
+
+    expected = SERVICE_BY_TRAFFIC_CLASS.get(traffic_class)
+    if "service" not in data:
+        if expected is None:
+            raise IntentError("missing_service", "traffic_class 为 all 时必须显式指定受支持 service。")
+        return expected
+    service = _parse_enum(ServiceType, data.get("service"), "service")
+    if expected is not None and service is not expected:
+        raise IntentError(
+            "service_scope_mismatch",
+            f"service {service.value!r} 与 traffic_class {traffic_class.value!r} 不匹配。",
+        )
+    return service
+
+
+def _parse_semantic_requirements(value: object) -> tuple[SemanticRequirement, ...]:
+    """校验只表达语义的扩展字段，禁止未知来源或隐式数值。"""
+
+    if not isinstance(value, list):
+        raise IntentError("invalid_semantic_requirements", "semantic_requirements 必须是数组。")
+    if len(value) > MAX_SEMANTIC_REQUIREMENTS:
+        raise IntentError(
+            "too_many_semantic_requirements",
+            f"semantic_requirements 最多包含 {MAX_SEMANTIC_REQUIREMENTS} 项。",
+        )
+    parsed: list[SemanticRequirement] = []
+    for item in value:
+        data = _expect_mapping(item, "semantic_requirement")
+        _reject_unknown_fields(data, _SEMANTIC_REQUIREMENT_FIELDS, "semantic_requirement")
+        evidence = _required_string(data, "evidence", MAX_SEMANTIC_EVIDENCE_LENGTH)
+        parsed.append(
+            SemanticRequirement(
+                metric=_parse_enum(SemanticMetric, data.get("metric"), "semantic_requirements.metric"),
+                level=_parse_enum(SemanticLevel, data.get("level"), "semantic_requirements.level"),
+                origin=_parse_enum(SemanticOrigin, data.get("origin"), "semantic_requirements.origin"),
+                evidence=evidence,
+            )
+        )
+    return tuple(parsed)
 
 
 def _parse_vehicle_ids(value: object, topology: TopologyInventory) -> tuple[str, ...]:
@@ -149,13 +313,14 @@ def _parse_constraints(value: object) -> tuple[Constraint, ...]:
     constraints: list[Constraint] = []
     for item in value:
         data = _expect_mapping(item, "constraint")
+        _reject_unknown_fields(data, _CONSTRAINT_FIELDS, "constraint")
         metric = _parse_enum(ConstraintMetric, data.get("metric"), "constraint.metric")
         operator = _parse_enum(ConstraintOperator, data.get("operator"), "constraint.operator")
         raw_value = data.get("value")
         if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
             raise IntentError("invalid_constraint_value", "约束值必须是正数。")
         numeric_value = float(raw_value)
-        if numeric_value <= 0:
+        if not math.isfinite(numeric_value) or numeric_value <= 0:
             raise IntentError("invalid_constraint_value", "约束值必须大于 0。")
         unit = _required_string(data, "unit", 16)
         _validate_metric_shape(metric, operator, numeric_value, unit)
@@ -189,7 +354,10 @@ def _validate_constraint_set(constraints: tuple[Constraint, ...]) -> None:
         item.value for item in constraints if item.metric is ConstraintMetric.MAX_BANDWIDTH_MBPS
     ]
     if min_values and max_values and max(min_values) > min(max_values):
-        raise IntentError("conflicting_constraints", "同一意图的最小带宽不能大于最大带宽。")
+        raise IntentError(
+            "conflicting_constraints",
+            "同一意图的显式约束冲突：最小带宽不能大于最大带宽；来源为用户显式输入。",
+        )
 
 
 def _parse_string_list(
@@ -238,3 +406,26 @@ def _required_string(data: Mapping[str, object], field: str, max_length: int) ->
     if not isinstance(value, str) or not value.strip() or len(value) > max_length:
         raise IntentError("invalid_string", f"{field} 必须是长度不超过 {max_length} 的非空字符串。")
     return value.strip()
+
+
+def _reject_unknown_fields(
+    data: Mapping[str, object], allowed: frozenset[str], field: str
+) -> None:
+    """拒绝未声明字段，避免客户端注入 Grounding、命令或其他伪造结果。"""
+
+    unknown = sorted(
+        (str(key) for key in data if not isinstance(key, str) or key not in allowed),
+    )
+    if unknown:
+        raise IntentError(
+            "unknown_field",
+            f"{field} 含不支持字段：{', '.join(unknown)}。",
+        )
+
+
+def reject_unknown_fields(
+    data: Mapping[str, object], allowed: frozenset[str], field: str
+) -> None:
+    """向输入适配器公开统一的未知字段检查，防止模型顶层字段绕过校验。"""
+
+    _reject_unknown_fields(data, allowed, field)

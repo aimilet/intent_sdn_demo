@@ -9,7 +9,7 @@ from intent_sdn_demo.errors import IntentError
 from intent_sdn_demo.extractor import IntentExtractor, RemoteIntentExtractor
 from intent_sdn_demo.models import ActorRole, IntentEnvelope, SourceChannel
 from intent_sdn_demo.topology import TopologyInventory
-from intent_sdn_demo.validation import build_envelope
+from intent_sdn_demo.validation import build_envelope, reject_unknown_fields
 
 
 class IntentParser:
@@ -34,6 +34,7 @@ class IntentParser:
         """结构化输入不经过模型，直接读取 intents 数组。"""
 
         data = self._coerce_json_object(payload)
+        reject_unknown_fields(data, frozenset({"intents"}), "结构化输入")
         intents = data.get("intents")
         return build_envelope(
             source_channel=SourceChannel.JSON,
@@ -54,6 +55,9 @@ class IntentParser:
         if len(text) > 2000:
             raise IntentError("text_too_long", "文字或语音转写内容不能超过 2000 个字符。")
         extracted = self._extractor.extract(text, actor_role)
+        if not isinstance(extracted, Mapping):
+            raise IntentError("invalid_llm_output", "远程模型返回的意图 JSON 必须是对象。", 422)
+        reject_unknown_fields(extracted, frozenset({"intents"}), "模型输出")
         intents = extracted.get("intents")
         return build_envelope(
             source_channel=source_channel,

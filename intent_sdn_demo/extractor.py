@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from intent_sdn_demo.errors import IntentError
 from intent_sdn_demo.models import ActorRole
+from intent_sdn_demo.validation import reject_unknown_fields
 
 
 LOGGER = logging.getLogger(__name__)
@@ -101,6 +102,9 @@ class RemoteIntentExtractor:
         except HTTPError as exc:
             LOGGER.warning("远程意图抽取服务返回 HTTP 状态：%s", exc.code)
             raise IntentError("llm_request_failed", "远程意图抽取服务拒绝了请求。", 503) from exc
+        except UnicodeDecodeError as exc:
+            LOGGER.warning("远程意图抽取服务返回了非 UTF-8 响应。")
+            raise IntentError("invalid_llm_output", "远程模型未返回合法的意图 JSON。", 422) from exc
         except (TimeoutError, URLError, OSError) as exc:
             LOGGER.warning("远程意图抽取服务不可用：%s", type(exc).__name__)
             raise IntentError("llm_unavailable", "远程意图抽取服务暂时不可用。", 503) from exc
@@ -113,6 +117,7 @@ class RemoteIntentExtractor:
             raise IntentError("invalid_llm_output", "远程模型未返回合法的意图 JSON。", 422) from exc
         if not isinstance(extracted, Mapping):
             raise IntentError("invalid_llm_output", "远程模型返回的意图 JSON 必须是对象。", 422)
+        reject_unknown_fields(extracted, frozenset({"intents"}), "模型输出")
         return extracted
 
 
@@ -120,5 +125,5 @@ def _system_prompt() -> str:
     """返回不可包含执行细节的固定抽取指令，降低模型越权概率。"""
 
     return """你是车联网通信意图抽取器。只返回 JSON 对象，格式为：
-{"intents":[{"scope":{"vehicle_ids":[...],"traffic_class":"emergency|control|navigation|video|all"},"objective":"prioritize_traffic|minimize_latency|relieve_network_congestion|limit_background_traffic","strength":"must|prefer","priority":"critical|high|normal|low","constraints":[{"metric":"latency_ms|min_bandwidth_mbps|max_bandwidth_mbps","operator":"<=|>=","value":数字,"unit":"ms|Mbps"}],"evidence":["原文片段"],"ambiguities":["无法确定的内容"]}]}
-规则：只使用原文明确出现的数值约束；不确定时将原因放入 ambiguities；不支持道路交通流控制；不得输出 Markdown、解释、命令、路径、端口、队列编号或任何其他字段。"""
+{"intents":[{"scope":{"vehicle_ids":[...],"traffic_class":"emergency|control|navigation|video|all"},"objective":"prioritize_traffic|minimize_latency|relieve_network_congestion|limit_background_traffic","service":"emergency_v2x|vehicle_control|navigation|background_video","strength":"must|prefer","priority":"critical|high|normal|low","constraints":[{"metric":"latency_ms|min_bandwidth_mbps|max_bandwidth_mbps","operator":"<=|>=","value":数字,"unit":"ms|Mbps"}],"semantic_requirements":[{"metric":"latency|bandwidth|reliability","level":"low|medium|high","origin":"explicit|inferred","evidence":"原文片段"}],"evidence":["原文片段"],"ambiguities":["无法确定的内容"]}]}
+规则：service 必须与 traffic_class 的固定业务映射一致；只使用原文明确出现的数值约束；semantic_requirements 只表达语义等级，不填写数值；不确定时将原因放入 ambiguities；不支持道路交通流控制；不得输出 Markdown、解释、命令、路径、端口、队列编号或任何其他字段。"""

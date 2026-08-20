@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -32,6 +32,38 @@ class TrafficClass(StrEnum):
     NAVIGATION = "navigation"
     VIDEO = "video"
     ALL = "all"
+
+
+class ServiceType(StrEnum):
+    """固定业务服务类型，用于查询本地版本化 SLA 条目。"""
+
+    EMERGENCY_V2X = "emergency_v2x"
+    VEHICLE_CONTROL = "vehicle_control"
+    NAVIGATION = "navigation"
+    BACKGROUND_VIDEO = "background_video"
+
+
+class SemanticMetric(StrEnum):
+    """语义层允许表达的质量指标，不携带任何执行参数。"""
+
+    LATENCY = "latency"
+    BANDWIDTH = "bandwidth"
+    RELIABILITY = "reliability"
+
+
+class SemanticLevel(StrEnum):
+    """语义质量等级；缺少数值时只保留等级，不推造阈值。"""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class SemanticOrigin(StrEnum):
+    """语义要求在原文中的来源。"""
+
+    EXPLICIT = "explicit"
+    INFERRED = "inferred"
 
 
 class Objective(StrEnum):
@@ -126,11 +158,14 @@ class Intent:
     constraints: tuple[Constraint, ...]
     evidence: tuple[str, ...]
     ambiguities: tuple[str, ...]
+    # 这两个字段追加在旧字段之后，保证已有 Python 调用方的构造顺序不变。
+    service: ServiceType | None = None
+    semantic_requirements: tuple["SemanticRequirement", ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """转换为 API 可序列化的数据。"""
 
-        return {
+        payload = {
             "scope": self.scope.to_dict(),
             "objective": self.objective.value,
             "strength": self.strength.value,
@@ -138,7 +173,14 @@ class Intent:
             "constraints": [item.to_dict() for item in self.constraints],
             "evidence": list(self.evidence),
             "ambiguities": list(self.ambiguities),
+            "semantic_requirements": [item.to_dict() for item in self.semantic_requirements],
         }
+        # 旧版直接构造的 Intent 没有 service；省略该键可由校验器按 traffic_class 补齐。
+        if self.service is not None:
+            payload["service"] = (
+                self.service.value if isinstance(self.service, ServiceType) else self.service
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -237,6 +279,52 @@ class SuppressedIntent:
 
 
 @dataclass(frozen=True)
+class SemanticRequirement:
+    """显式或推断出的语义要求，严格限制为可展示的非数值信息。"""
+
+    metric: SemanticMetric
+    level: SemanticLevel
+    origin: SemanticOrigin
+    evidence: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """转换为前端可展示的语义证据。"""
+
+        return {
+            "metric": self.metric.value,
+            "level": self.level.value,
+            "origin": self.origin.value,
+            "evidence": self.evidence,
+        }
+
+
+@dataclass(frozen=True)
+class GroundingRecord:
+    """服务端依据只读 SLA 条目生成的知识落地证据。"""
+
+    service: ServiceType
+    profile_id: str
+    profile_version: str
+    derived_constraints: tuple[Constraint, ...]
+    preference_order: tuple[str, ...]
+    reason: str
+    conflicts: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """转换为 API 证据结构；该记录不包含可执行命令。"""
+
+        return {
+            "service": self.service.value,
+            "profile_id": self.profile_id,
+            "profile_version": self.profile_version,
+            "derived_constraints": [item.to_dict() for item in self.derived_constraints],
+            "preference_order": list(self.preference_order),
+            "reason": self.reason,
+            "conflicts": list(self.conflicts),
+        }
+
+
+@dataclass(frozen=True)
 class ArbitrationResult:
     """仲裁输出：ready 可继续编译，blocked 时必须停止下发。"""
 
@@ -265,6 +353,17 @@ class CandidateEvaluation:
     hard_satisfied: bool
     soft_coverage: float
     rejection_reasons: tuple[str, ...]
+    # 评价器输出的来源和 KPI 状态均为展示数据，不能直接成为执行参数。
+    evaluation_source: str = "deterministic_configuration"
+    dynamic_kpis: dict[str, object] = field(
+        default_factory=lambda: {
+            "emergency_p95_latency_ms": "not_available",
+            "throughput_mbps": "not_available",
+            "packet_loss_percent": "not_available",
+        }
+    )
+    utility_score: float = 0.0
+    utility_breakdown: tuple[tuple[str, float], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """转换为 API 可序列化的数据。"""
@@ -275,6 +374,12 @@ class CandidateEvaluation:
             "hard_satisfied": self.hard_satisfied,
             "soft_coverage": round(self.soft_coverage, 4),
             "rejection_reasons": list(self.rejection_reasons),
+            "evaluation_source": self.evaluation_source,
+            "dynamic_kpis": self.dynamic_kpis,
+            "utility_score": round(self.utility_score, 4),
+            "utility_breakdown": {
+                key: round(value, 4) for key, value in self.utility_breakdown
+            },
         }
 
 
@@ -287,6 +392,7 @@ class DecisionBundle:
     candidates: tuple[CandidateEvaluation, ...]
     selected_plan: CandidatePlan | None
     selection_reason: str
+    grounding: tuple[GroundingRecord, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """转换为 API 可序列化的数据。"""
@@ -297,6 +403,7 @@ class DecisionBundle:
             "candidates": [item.to_dict() for item in self.candidates],
             "selected_plan": self.selected_plan.to_dict() if self.selected_plan else None,
             "selection_reason": self.selection_reason,
+            "grounding": [item.to_dict() for item in self.grounding],
         }
 
 

@@ -22,6 +22,7 @@ def _intent(
     vehicle_ids: list[str] | None = None,
     constraints: list[dict[str, object]] | None = None,
     ambiguities: list[str] | None = None,
+    evidence: list[str] | None = None,
 ) -> dict[str, object]:
     """构造满足基本格式的测试意图，避免各用例重复无关字段。"""
 
@@ -31,7 +32,7 @@ def _intent(
         "strength": strength,
         "priority": priority,
         "constraints": constraints or [],
-        "evidence": ["测试输入"],
+        "evidence": evidence or ["测试输入"],
         "ambiguities": ambiguities or [],
     }
 
@@ -289,6 +290,7 @@ class IntentFlowTest(unittest.TestCase):
                         objective="minimize_latency",
                         strength="must",
                         priority="critical",
+                        evidence=["救护车必须低时延。"],
                     )
                 ]
             }
@@ -352,9 +354,10 @@ class IntentFlowTest(unittest.TestCase):
             {"envelopes": [dispatcher.to_dict(), operator.to_dict()]}
         )
 
-        self.assertEqual(decision.status, "ready")
-        self.assertEqual(decision.selected_plan.plan_id, "critical_priority")
+        self.assertEqual(decision.status, "blocked")
+        self.assertIsNone(decision.selected_plan)
         self.assertEqual(len(decision.arbitration.suppressed_intents), 1)
+        self.assertTrue(any("业务范围" in item for item in decision.candidates[1].rejection_reasons))
 
     def test_same_role_hard_conflict_blocks_execution(self) -> None:
         """同等级主体的互斥硬目标必须阻断，不得从输入顺序推断取舍。"""

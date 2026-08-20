@@ -127,6 +127,20 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .compact { min-height: 22rem; }
 .empty-state { min-height: 4rem; padding: .65rem; border-left: 3px solid #b1c5de; background: #f3f7fb; color: #415570; font-size: .86rem; }
 
+.semantic-output, .evaluation-output { display: grid; gap: .55rem; margin-bottom: .7rem; }
+.semantic-card, .evaluation-card { padding: .65rem .7rem; border: 1px solid var(--line); border-radius: .45rem; background: #f8fbff; }
+.semantic-card-title, .evaluation-card-title { margin: 0 0 .25rem; color: #173a67; font-size: .82rem; }
+.semantic-card-meta, .evaluation-source, .evaluation-score, .evaluation-note { margin: .2rem 0; color: var(--muted); font-size: .7rem; line-height: 1.4; }
+.semantic-subtitle { margin: .55rem 0 .25rem; color: #314a68; font-size: .72rem; }
+.semantic-list { margin: .2rem 0; padding-left: 1.2rem; color: #415570; font-size: .7rem; line-height: 1.45; }
+.muted-item { color: var(--muted); }
+.grounding-box { margin-top: .5rem; padding: .4rem .5rem; border-left: 3px solid #7955b3; background: #f7f3ff; }
+.grounding-conflict { margin: .35rem 0 0; padding: .3rem .4rem; border-left: 3px solid var(--danger); background: #fff1f2; color: #8f2736; font-size: .7rem; line-height: 1.4; }
+.evaluation-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(0, 139, 111, .15); }
+.evaluation-card.selected .evaluation-card-title { color: var(--accent); }
+.evaluation-kpis { max-height: 9rem; overflow: auto; }
+.measured-note { border-top: 1px solid var(--line); padding-top: .45rem; }
+
 .topology-toolbar { display: flex; align-items: center; justify-content: space-between; gap: .8rem; margin-bottom: .55rem; }
 .topology-phase { color: var(--ink); font-size: .85rem; font-weight: 750; }
 .topology-hint { color: var(--muted); font-size: .74rem; text-align: right; }

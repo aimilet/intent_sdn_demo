@@ -44,7 +44,7 @@
       <div id="text-input" class="channel-content hidden">
         <label for="text-payload">文字意图</label>
         <textarea id="text-payload" maxlength="2000" placeholder="例如：救护车消息必须低时延，视频可降级。"></textarea>
-        <p class="hint">文字由已配置的远程模型抽取为 IR；模型不参与策略下发。</p>
+        <p class="hint">文字由已配置的远程模型抽取为 IR；模型不参与策略执行。</p>
       </div>
       <div id="voice-input" class="channel-content hidden">
         <button id="start-voice" class="secondary" type="button">开始语音转写</button>
@@ -78,9 +78,10 @@
     <section class="panel" aria-labelledby="ir-title">
       <div class="panel-heading">
         <p class="panel-index">02</p>
-        <h2 id="ir-title">Intent IR</h2>
+        <h2 id="ir-title">语义与知识落地</h2>
       </div>
-      <p class="hint">校验后的唯一中间表示。原始文本不会参与命令拼接。</p>
+      <p class="hint">Intent IR：区分显式/隐式语义与服务端 SLA Grounding；原始文本不会参与命令拼接。</p>
+      <div id="semantic-output" class="semantic-output" aria-live="polite">等待解析…</div>
       <pre id="ir-output" class="data-output" aria-live="polite">等待解析…</pre>
     </section>
 
@@ -90,6 +91,7 @@
         <h2 id="decision-title">仲裁与策略预览</h2>
       </div>
       <div id="decision-summary" class="empty-state">完成解析后可进行规则仲裁与候选择优。</div>
+      <div id="evaluation-output" class="evaluation-output" aria-live="polite">尚未编译。</div>
       <pre id="decision-output" class="data-output compact" aria-live="polite">尚未编译。</pre>
     </section>
 
@@ -99,14 +101,14 @@
         <h2 id="topology-title">Mininet 拓扑与指标</h2>
       </div>
       <div id="topology-output" class="topology-output">加载中…</div>
-      <div id="metrics-output" class="metrics-output">尚无已确认下发的实测指标。</div>
+      <div id="metrics-output" class="metrics-output">尚无已确认验证的实测指标。</div>
     </section>
   </main>
 
   <footer class="action-bar">
     <button id="parse-intent" type="button">1. 加入来源意图</button>
     <button id="compile-policy" type="button" class="secondary" disabled>2. 编译策略</button>
-    <button id="apply-policy" type="button" class="accent" disabled>3. 确认下发并验证</button>
+    <button id="apply-policy" type="button" class="accent" disabled>3. 确认验证</button>
     <button id="reset-policy" type="button" class="danger">重置</button>
   </footer>
 

@@ -66,7 +66,7 @@ class IntentSdnRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, self.service.apply_request(payload))
                 return
             if path == "/api/policies/reset":
-                self._send_json(HTTPStatus.OK, self.service.reset_request())
+                self._send_json(HTTPStatus.OK, self.service.reset_request(payload))
                 return
             self._send_error_json(HTTPStatus.NOT_FOUND, "not_found", "请求的资源不存在。")
         except IntentError as exc:

@@ -18,8 +18,10 @@ const elements = {
   scenario: document.querySelector("#scenario"),
   envelopeList: document.querySelector("#envelope-list"),
   clearBatchButton: document.querySelector("#clear-batch"),
+  semanticOutput: document.querySelector("#semantic-output"),
   irOutput: document.querySelector("#ir-output"),
   decisionSummary: document.querySelector("#decision-summary"),
+  evaluationOutput: document.querySelector("#evaluation-output"),
   decisionOutput: document.querySelector("#decision-output"),
   topologyOutput: document.querySelector("#topology-output"),
   metricsOutput: document.querySelector("#metrics-output"),
@@ -57,6 +59,30 @@ const planLabels = {
   critical_priority: "紧急优先",
   congestion_relief: "视频治理",
   combined: "综合保障",
+};
+
+const serviceLabels = {
+  emergency_v2x: "应急 V2X",
+  vehicle_control: "车辆控制",
+  navigation: "导航",
+  background_video: "背景视频",
+};
+
+const semanticMetricLabels = {
+  latency: "时延语义",
+  bandwidth: "带宽语义",
+  reliability: "可靠性语义",
+};
+
+const semanticOriginLabels = {
+  explicit: "显式表达",
+  inferred: "语义推断",
+};
+
+const evaluationSourceLabels = {
+  deterministic_configuration: "配置能力（确定性评价）",
+  model_prediction: "模型预测",
+  mininet_measured: "Mininet 实测",
 };
 
 const scenarios = {
@@ -155,6 +181,7 @@ function renderEnvelopeBatch() {
     empty.textContent = "尚未加入来源意图。";
     elements.envelopeList.appendChild(empty);
     elements.compileButton.disabled = true;
+    renderSemanticDetails([], null);
     elements.irOutput.textContent = "等待解析…";
     return;
   }
@@ -172,11 +199,133 @@ function renderEnvelopeBatch() {
     elements.envelopeList.appendChild(item);
   });
   elements.irOutput.textContent = JSON.stringify(state.envelopes, null, 2);
+  renderSemanticDetails(state.envelopes, null);
   elements.compileButton.disabled = false;
+}
+
+function textNode(tagName, className, text) {
+  const node = document.createElement(tagName);
+  if (className) {
+    node.className = className;
+  }
+  node.textContent = text;
+  return node;
+}
+
+function formatConstraint(constraint) {
+  if (!constraint || typeof constraint !== "object") {
+    return "约束结构不可用";
+  }
+  const metric = constraint.metric || "unknown_metric";
+  const operator = constraint.operator || "?";
+  const value = constraint.value === undefined ? "?" : constraint.value;
+  const unit = constraint.unit || "";
+  return `${metric} ${operator} ${value} ${unit}`.trim();
+}
+
+function renderSemanticDetails(envelopes, decision = null) {
+  elements.semanticOutput.replaceChildren();
+  if (!Array.isArray(envelopes) || envelopes.length === 0) {
+    elements.semanticOutput.appendChild(textNode("p", "empty-state", "等待解析…"));
+    return;
+  }
+  const grounding = Array.isArray(decision?.grounding) ? decision.grounding : [];
+  let groundingIndex = 0;
+  envelopes.forEach((envelope) => {
+    (Array.isArray(envelope.intents) ? envelope.intents : []).forEach((intent) => {
+      const card = document.createElement("article");
+      card.className = "semantic-card";
+      const trafficClass = intent.scope?.traffic_class || "unknown";
+      const service = intent.service || "unknown";
+      card.appendChild(textNode("h3", "semantic-card-title", `${trafficLabels[trafficClass] || trafficClass} · ${serviceLabels[service] || service}`));
+      card.appendChild(textNode("p", "semantic-card-meta", `来源：${roleLabels[envelope.actor_role] || envelope.actor_role} · 目标：${intent.objective || "unknown"}`));
+
+      const requirementList = document.createElement("ul");
+      requirementList.className = "semantic-list";
+      const requirements = Array.isArray(intent.semantic_requirements) ? intent.semantic_requirements : [];
+      if (requirements.length === 0) {
+        requirementList.appendChild(textNode("li", "muted-item", "未提供语义等级；系统不补造数值阈值。"));
+      } else {
+        requirements.forEach((requirement) => {
+          const metric = semanticMetricLabels[requirement.metric] || requirement.metric || "unknown";
+          const origin = semanticOriginLabels[requirement.origin] || requirement.origin || "unknown";
+          requirementList.appendChild(textNode("li", "", `${origin} · ${metric}：${requirement.level || "unknown"} · 证据：${requirement.evidence || "无"}`));
+        });
+      }
+      card.appendChild(textNode("h4", "semantic-subtitle", "显式/隐式语义"));
+      card.appendChild(requirementList);
+
+      const record = grounding[groundingIndex];
+      groundingIndex += 1;
+      const groundingBox = document.createElement("div");
+      groundingBox.className = "grounding-box";
+      if (!record) {
+        groundingBox.appendChild(textNode("p", "muted-item", "尚未执行服务端 Grounding。"));
+      } else {
+        groundingBox.appendChild(textNode("h4", "semantic-subtitle", `SLA：${record.profile_id || "unknown"} · 版本 ${record.profile_version || "unknown"}`));
+        groundingBox.appendChild(textNode("p", "semantic-card-meta", record.reason || "无 SLA 原因说明"));
+        const derived = Array.isArray(record.derived_constraints) ? record.derived_constraints : [];
+        const derivedList = document.createElement("ul");
+        derivedList.className = "semantic-list";
+        if (derived.length === 0) {
+          derivedList.appendChild(textNode("li", "muted-item", "无派生约束"));
+        } else {
+          derived.forEach((constraint) => derivedList.appendChild(textNode("li", "", `派生约束：${formatConstraint(constraint)}`)));
+        }
+        groundingBox.appendChild(derivedList);
+        const conflicts = Array.isArray(record.conflicts) ? record.conflicts : [];
+        conflicts.forEach((conflict) => groundingBox.appendChild(textNode("p", "grounding-conflict", conflict)));
+      }
+      card.appendChild(groundingBox);
+      elements.semanticOutput.appendChild(card);
+    });
+  });
+}
+
+function renderEvaluationDetails(decision) {
+  elements.evaluationOutput.replaceChildren();
+  if (!decision || !Array.isArray(decision.candidates)) {
+    elements.evaluationOutput.appendChild(textNode("p", "empty-state", "尚未编译。"));
+    return;
+  }
+  const sourceNote = decision.status === "ready"
+    ? "候选排序使用配置能力与 SLA 偏好；动态 KPI 无可靠模型时为 not_available。"
+    : "当前决策已阻断，不存在可执行候选。";
+  elements.evaluationOutput.appendChild(textNode("p", "evaluation-note", sourceNote));
+  decision.candidates.forEach((candidate) => {
+    const card = document.createElement("article");
+    card.className = `evaluation-card${candidate.plan?.plan_id === decision.selected_plan?.plan_id ? " selected" : ""}`;
+    const planId = candidate.plan?.plan_id || "unknown_plan";
+    card.appendChild(textNode("h3", "evaluation-card-title", `${planLabels[planId] || planId}${candidate.plan?.plan_id === decision.selected_plan?.plan_id ? " · 已选择" : ""}`));
+    card.appendChild(textNode("p", "evaluation-source", `评价来源：${evaluationSourceLabels[candidate.evaluation_source] || candidate.evaluation_source || "unknown"}`));
+    card.appendChild(textNode("p", "evaluation-score", `效用分：${candidate.utility_score ?? "not_available"} · 软覆盖率：${candidate.soft_coverage ?? "not_available"}`));
+
+    const kpiList = document.createElement("ul");
+    kpiList.className = "semantic-list evaluation-kpis";
+    const kpis = candidate.dynamic_kpis && typeof candidate.dynamic_kpis === "object" ? candidate.dynamic_kpis : {};
+    Object.entries(kpis).forEach(([name, value]) => {
+      const shown = value === "not_available" ? "not_available（无可靠模型）" : value === null ? "null（未提供）" : value;
+      kpiList.appendChild(textNode("li", "", `${name}：${shown}`));
+    });
+    card.appendChild(textNode("h4", "semantic-subtitle", "动态 KPI（模型预测）"));
+    card.appendChild(kpiList);
+
+    const breakdown = candidate.utility_breakdown && typeof candidate.utility_breakdown === "object" ? candidate.utility_breakdown : {};
+    const breakdownList = document.createElement("ul");
+    breakdownList.className = "semantic-list";
+    Object.entries(breakdown).forEach(([name, value]) => breakdownList.appendChild(textNode("li", "", `${name}：${value}`)));
+    card.appendChild(textNode("h4", "semantic-subtitle", "效用分解（配置推导）"));
+    card.appendChild(breakdownList);
+    (candidate.rejection_reasons || []).forEach((reason) => card.appendChild(textNode("p", "grounding-conflict", reason)));
+    elements.evaluationOutput.appendChild(card);
+  });
+  elements.evaluationOutput.appendChild(textNode("p", "evaluation-note measured-note", "Mininet 实测仅在确认验证后显示于右侧指标区；此处不把预测当作实测。"));
 }
 
 function invalidateDecision() {
   state.decision = null;
+  renderSemanticDetails(state.envelopes, null);
+  renderEvaluationDetails(null);
   elements.decisionOutput.textContent = "尚未编译。";
   elements.decisionSummary.textContent = state.envelopes.length
     ? "来源意图已更新，请重新执行规则仲裁。"
@@ -239,12 +388,16 @@ async function compilePolicy() {
         decision.selected_plan ? "preview" : "baseline",
       );
     }
+    renderSemanticDetails(state.envelopes, decision);
+    renderEvaluationDetails(decision);
     elements.decisionOutput.textContent = JSON.stringify(decision, null, 2);
     elements.decisionSummary.textContent = decision.selection_reason;
     elements.applyButton.disabled = decision.status !== "ready" || !decision.selected_plan;
-    setStatus(decision.status === "ready" ? "策略已预览，等待人工确认下发。" : "策略被规则阻断。", decision.status === "ready" ? "success" : "error");
+    setStatus(decision.status === "ready" ? "策略已预览，等待人工确认验证。" : "策略被规则阻断。", decision.status === "ready" ? "success" : "error");
   } catch (error) {
     elements.applyButton.disabled = true;
+    renderSemanticDetails(state.envelopes, null);
+    renderEvaluationDetails(null);
     elements.decisionSummary.textContent = `编译失败：${error.message}`;
     if (state.topology) {
       renderTopology(state.topology, "baseline", "baseline");
@@ -266,9 +419,9 @@ async function applyPolicy() {
     if (state.topology) {
       renderTopology(state.topology, result.plan_id, "applied");
     }
-    setStatus(`验证完成：已确认下发 ${planId}。`, "success");
+    setStatus(`验证完成：已在 Mininet 中执行 ${planId}。`, "success");
   } catch (error) {
-    setStatus(`未下发策略：${error.message}`, "error");
+    setStatus(`未执行策略：${error.message}`, "error");
   } finally {
     elements.applyButton.disabled = false;
   }
@@ -282,6 +435,7 @@ async function resetPolicy() {
       renderTopology(state.topology, "baseline", "baseline");
     }
     elements.decisionSummary.textContent = result.message;
+    renderEvaluationDetails(null);
     elements.metricsOutput.textContent = "已重置；不存在可展示的策略验证指标。";
     setStatus("已清除策略预览与指标缓存。", "success");
   } catch (error) {
@@ -394,41 +548,47 @@ function renderTopology(topology, planId = "baseline", phase = "baseline") {
     </div>`;
 }
 
-function metricRow(label, baseline, applied, unit = "") {
-  const before = baseline === null || baseline === undefined ? "无样本" : `${baseline}${unit}`;
-  const after = applied === null || applied === undefined ? "无样本" : `${applied}${unit}`;
-  return `<tr><th>${label}</th><td>${before}</td><td>${after}</td></tr>`;
-}
-
 function renderMetrics(snapshot) {
   // 卡片突出关键结果，完整表格仍保留基线与策略后的逐项核对数据。
+  const baseline = snapshot?.baseline || {};
+  const applied = snapshot?.applied || {};
+  const baselineThroughput = baseline.throughput_mbps || {};
+  const appliedThroughput = applied.throughput_mbps || {};
+  const baselineLoss = baseline.packet_loss_percent || {};
+  const appliedLoss = applied.packet_loss_percent || {};
+  const baselineUtilization = baseline.link_utilization_percent || {};
+  const appliedUtilization = applied.link_utilization_percent || {};
   const rows = [
-    metricRow("紧急业务 P95 时延", snapshot.baseline.emergency_p95_latency_ms, snapshot.applied.emergency_p95_latency_ms, " ms"),
-    ...Object.keys(snapshot.applied.throughput_mbps).map((traffic) => metricRow(`${trafficLabels[traffic] || traffic} 吞吐`, snapshot.baseline.throughput_mbps[traffic], snapshot.applied.throughput_mbps[traffic], " Mbps")),
-    ...Object.keys(snapshot.applied.packet_loss_percent).map((traffic) => metricRow(`${trafficLabels[traffic] || traffic} 丢包`, snapshot.baseline.packet_loss_percent[traffic], snapshot.applied.packet_loss_percent[traffic], " %")),
-    ...Object.keys(snapshot.applied.link_utilization_percent).map((path) => metricRow(`${pathLabels[path] || path} 利用率`, snapshot.baseline.link_utilization_percent[path], snapshot.applied.link_utilization_percent[path], " %")),
+    ["紧急业务 P95 时延", baseline.emergency_p95_latency_ms, applied.emergency_p95_latency_ms, " ms"],
+    ...Object.keys(appliedThroughput).map((traffic) => [`${trafficLabels[traffic] || traffic} 吞吐`, baselineThroughput[traffic], appliedThroughput[traffic], " Mbps"]),
+    ...Object.keys(appliedLoss).map((traffic) => [`${trafficLabels[traffic] || traffic} 丢包`, baselineLoss[traffic], appliedLoss[traffic], " %"]),
+    ...Object.keys(appliedUtilization).map((path) => [`${pathLabels[path] || path} 利用率`, baselineUtilization[path], appliedUtilization[path], " %"]),
   ];
   const cards = [
-    ["紧急 P95 时延", snapshot.baseline.emergency_p95_latency_ms, snapshot.applied.emergency_p95_latency_ms, " ms", "emergency"],
-    ...Object.keys(snapshot.applied.throughput_mbps).map((traffic) => [
+    ["紧急 P95 时延", baseline.emergency_p95_latency_ms, applied.emergency_p95_latency_ms, " ms", "emergency"],
+    ...Object.keys(appliedThroughput).map((traffic) => [
       `${trafficLabels[traffic] || traffic} 吞吐`,
-      snapshot.baseline.throughput_mbps[traffic],
-      snapshot.applied.throughput_mbps[traffic],
+      baselineThroughput[traffic],
+      appliedThroughput[traffic],
       " Mbps",
       traffic,
-      snapshot.baseline.packet_loss_percent[traffic],
-      snapshot.applied.packet_loss_percent[traffic],
+      baselineLoss[traffic],
+      appliedLoss[traffic],
     ]),
-    ...Object.keys(snapshot.applied.link_utilization_percent).map((path) => [
+    ...Object.keys(appliedUtilization).map((path) => [
       `${pathLabels[path] || path} 利用率`,
-      snapshot.baseline.link_utilization_percent[path],
-      snapshot.applied.link_utilization_percent[path],
+      baselineUtilization[path],
+      appliedUtilization[path],
       " %",
       "path",
     ]),
   ];
-  elements.metricsOutput.innerHTML = `<p class="metric-title">计划：${planLabels[snapshot.plan_id] || snapshot.plan_id}</p><div class="metric-cards"></div><details class="metric-details"><summary>查看完整指标表</summary><table><thead><tr><th>指标</th><th>基线</th><th>策略后</th></tr></thead><tbody>${rows.join("")}</tbody></table></details>`;
-  const cardContainer = elements.metricsOutput.querySelector(".metric-cards");
+  elements.metricsOutput.replaceChildren();
+  const planLabel = planLabels[snapshot?.plan_id] || "固定计划";
+  elements.metricsOutput.appendChild(textNode("p", "metric-title", `Mininet 实测指标 · 计划：${planLabel}`));
+  const cardContainer = document.createElement("div");
+  cardContainer.className = "metric-cards";
+  elements.metricsOutput.appendChild(cardContainer);
   cards.forEach(([label, baseline, applied, unit, category, baselineLoss, appliedLoss]) => {
     const card = document.createElement("article");
     card.className = `metric-card ${category}`;
@@ -446,6 +606,26 @@ function renderMetrics(snapshot) {
     card.append(title, value, detail);
     cardContainer.appendChild(card);
   });
+  const details = document.createElement("details");
+  details.className = "metric-details";
+  details.appendChild(textNode("summary", "", "查看完整指标表（基线/策略后实测）"));
+  const table = document.createElement("table");
+  const header = document.createElement("thead");
+  const headerRow = document.createElement("tr");
+  ["指标", "基线", "策略后"].forEach((label) => headerRow.appendChild(textNode("th", "", label)));
+  header.appendChild(headerRow);
+  table.appendChild(header);
+  const body = document.createElement("tbody");
+  rows.forEach(([label, before, after, unit]) => {
+    const row = document.createElement("tr");
+    row.appendChild(textNode("th", "", label));
+    row.appendChild(textNode("td", "", before === null || before === undefined ? "无样本" : `${before}${unit}`));
+    row.appendChild(textNode("td", "", after === null || after === undefined ? "无样本" : `${after}${unit}`));
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  details.appendChild(table);
+  elements.metricsOutput.appendChild(details);
 }
 
 function loadScenario() {
